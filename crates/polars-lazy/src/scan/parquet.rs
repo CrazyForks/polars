@@ -3,35 +3,40 @@ use std::path::{Path, PathBuf};
 use polars_core::prelude::*;
 use polars_io::cloud::CloudOptions;
 use polars_io::parquet::read::ParallelStrategy;
+use polars_io::utils::is_cloud_url;
 use polars_io::{HiveOptions, RowIndex};
 
 use crate::prelude::*;
+use crate::scan::file_list_reader::get_glob_start_idx;
 
 #[derive(Clone)]
 pub struct ScanArgsParquet {
     pub n_rows: Option<usize>,
-    pub cache: bool,
     pub parallel: ParallelStrategy,
-    pub rechunk: bool,
     pub row_index: Option<RowIndex>,
-    pub low_memory: bool,
     pub cloud_options: Option<CloudOptions>,
-    pub use_statistics: bool,
     pub hive_options: HiveOptions,
+    pub use_statistics: bool,
+    pub low_memory: bool,
+    pub rechunk: bool,
+    pub cache: bool,
+    /// Expand path given via globbing rules.
+    pub glob: bool,
 }
 
 impl Default for ScanArgsParquet {
     fn default() -> Self {
         Self {
             n_rows: None,
-            cache: true,
             parallel: Default::default(),
-            rechunk: false,
             row_index: None,
-            low_memory: false,
             cloud_options: None,
-            use_statistics: true,
             hive_options: Default::default(),
+            use_statistics: true,
+            rechunk: false,
+            low_memory: false,
+            cache: true,
+            glob: true,
         }
     }
 }
@@ -39,15 +44,13 @@ impl Default for ScanArgsParquet {
 #[derive(Clone)]
 struct LazyParquetReader {
     args: ScanArgsParquet,
-    path: PathBuf,
     paths: Arc<[PathBuf]>,
 }
 
 impl LazyParquetReader {
-    fn new(path: PathBuf, args: ScanArgsParquet) -> Self {
+    fn new(args: ScanArgsParquet) -> Self {
         Self {
             args,
-            path,
             paths: Arc::new([]),
         }
     }
@@ -56,23 +59,22 @@ impl LazyParquetReader {
 impl LazyFileListReader for LazyParquetReader {
     /// Get the final [LazyFrame].
     fn finish(mut self) -> PolarsResult<LazyFrame> {
-        if let Some(paths) = self.iter_paths()? {
-            let paths = paths
-                .into_iter()
-                .collect::<PolarsResult<Arc<[PathBuf]>>>()?;
-            self.paths = paths;
-        }
-        self.finish_no_glob()
-    }
+        let (paths, hive_start_idx) =
+            self.expand_paths(self.args.hive_options.enabled.unwrap_or(false))?;
+        self.args.hive_options.enabled =
+            Some(self.args.hive_options.enabled.unwrap_or_else(|| {
+                self.paths.len() == 1
+                    && get_glob_start_idx(self.paths[0].to_str().unwrap().as_bytes()).is_none()
+                    && !paths.is_empty()
+                    && {
+                        (!is_cloud_url(&paths[0]) && paths[0].is_dir())
+                            || (paths[0] != self.paths[0])
+                    }
+            }));
+        self.args.hive_options.hive_start_idx = hive_start_idx;
 
-    fn finish_no_glob(self) -> PolarsResult<LazyFrame> {
         let row_index = self.args.row_index;
 
-        let paths = if self.paths.is_empty() {
-            Arc::new([self.path]) as Arc<[PathBuf]>
-        } else {
-            self.paths
-        };
         let mut lf: LazyFrame = DslBuilder::scan_parquet(
             paths,
             self.args.n_rows,
@@ -97,17 +99,16 @@ impl LazyFileListReader for LazyParquetReader {
         Ok(lf)
     }
 
-    fn path(&self) -> &Path {
-        self.path.as_path()
+    fn glob(&self) -> bool {
+        self.args.glob
+    }
+
+    fn finish_no_glob(self) -> PolarsResult<LazyFrame> {
+        unreachable!();
     }
 
     fn paths(&self) -> &[PathBuf] {
         &self.paths
-    }
-
-    fn with_path(mut self, path: PathBuf) -> Self {
-        self.path = path;
-        self
     }
 
     fn with_paths(mut self, paths: Arc<[PathBuf]>) -> Self {
@@ -150,13 +151,13 @@ impl LazyFileListReader for LazyParquetReader {
 impl LazyFrame {
     /// Create a LazyFrame directly from a parquet scan.
     pub fn scan_parquet(path: impl AsRef<Path>, args: ScanArgsParquet) -> PolarsResult<Self> {
-        LazyParquetReader::new(path.as_ref().to_owned(), args).finish()
+        LazyParquetReader::new(args)
+            .with_paths(Arc::new([path.as_ref().to_path_buf()]))
+            .finish()
     }
 
     /// Create a LazyFrame directly from a parquet scan.
     pub fn scan_parquet_files(paths: Arc<[PathBuf]>, args: ScanArgsParquet) -> PolarsResult<Self> {
-        LazyParquetReader::new(PathBuf::new(), args)
-            .with_paths(paths)
-            .finish()
+        LazyParquetReader::new(args).with_paths(paths).finish()
     }
 }
