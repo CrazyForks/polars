@@ -149,7 +149,7 @@ where
                         metadata,
                         file_options,
                         file_info,
-                        hive_parts,
+                        hive_parts.map(|h| h.into_statistics()),
                         verbose,
                         predicate,
                     )?;
@@ -222,6 +222,9 @@ where
                         _ => unreachable!(),
                     }
                 },
+                SinkType::Partition { .. } => {
+                    polars_bail!(InvalidOperation: "partitioning sink not supported in old streaming engine")
+                },
             }
         },
         Join {
@@ -279,7 +282,7 @@ where
                                 swapped,
                                 join_columns_left,
                                 join_columns_right,
-                                options.args.join_nulls,
+                                options.args.nulls_equal,
                                 node,
                                 // We don't need the key names for these joins.
                                 vec![].into(),
@@ -306,7 +309,7 @@ where
                                 swapped,
                                 join_columns_left,
                                 join_columns_right,
-                                options.args.join_nulls,
+                                options.args.nulls_equal,
                                 node,
                                 key_names_left,
                                 key_names_right,

@@ -4,7 +4,7 @@ use std::{mem, ops};
 
 use arrow::datatypes::ArrowSchemaRef;
 use polars_row::ArrayRef;
-use polars_schema::schema::debug_ensure_matching_schema_names;
+use polars_schema::schema::ensure_matching_schema_names;
 use polars_utils::itertools::Itertools;
 use rayon::prelude::*;
 
@@ -19,6 +19,7 @@ use crate::{HEAD_DEFAULT_LENGTH, TAIL_DEFAULT_LENGTH};
 
 #[cfg(feature = "dataframe_arithmetic")]
 mod arithmetic;
+pub mod builder;
 mod chunks;
 pub use chunks::chunk_df_for_writing;
 pub mod column;
@@ -31,6 +32,7 @@ pub(crate) mod horizontal;
 pub mod row;
 mod top_k;
 mod upstream_traits;
+mod validation;
 
 use arrow::record_batch::{RecordBatch, RecordBatchT};
 use polars_utils::pl_str::PlSmallStr;
@@ -182,6 +184,11 @@ impl DataFrame {
     }
 
     #[inline]
+    pub fn column_iter(&self) -> impl ExactSizeIterator<Item = &Column> {
+        self.columns.iter()
+    }
+
+    #[inline]
     pub fn materialized_column_iter(&self) -> impl ExactSizeIterator<Item = &Series> {
         self.columns.iter().map(Column::as_materialized_series)
     }
@@ -260,6 +267,8 @@ impl DataFrame {
 
     /// Create a DataFrame from a Vector of Series.
     ///
+    /// Errors if a column names are not unique, or if heights are not all equal.
+    ///
     /// # Example
     ///
     /// ```
@@ -271,17 +280,9 @@ impl DataFrame {
     /// # Ok::<(), PolarsError>(())
     /// ```
     pub fn new(columns: Vec<Column>) -> PolarsResult<Self> {
-        ensure_names_unique(&columns, |s| s.name().as_str())?;
-
-        let Some(fst) = columns.first() else {
-            return Ok(DataFrame {
-                height: 0,
-                columns,
-                cached_schema: OnceLock::new(),
-            });
-        };
-
-        Self::new_with_height(fst.len(), columns)
+        DataFrame::validate_columns_slice(&columns)
+            .map_err(|e| e.wrap_msg(|e| format!("could not create a new DataFrame: {}", e)))?;
+        Ok(unsafe { Self::new_no_checks_height_from_first(columns) })
     }
 
     pub fn new_with_height(height: usize, columns: Vec<Column>) -> PolarsResult<Self> {
@@ -522,11 +523,7 @@ impl DataFrame {
     /// having an equal length and a unique name, if not this may panic down the line.
     pub unsafe fn new_no_checks(height: usize, columns: Vec<Column>) -> DataFrame {
         if cfg!(debug_assertions) {
-            ensure_names_unique(&columns, |s| s.name().as_str()).unwrap();
-
-            for col in &columns {
-                assert_eq!(col.len(), height);
-            }
+            DataFrame::validate_columns_slice(&columns).unwrap();
         }
 
         unsafe { Self::_new_no_checks_impl(height, columns) }
@@ -542,30 +539,6 @@ impl DataFrame {
             columns,
             cached_schema: OnceLock::new(),
         }
-    }
-
-    /// Create a new `DataFrame` but does not check the length of the `Series`,
-    /// only check for duplicates.
-    ///
-    /// It is advised to use [DataFrame::new] in favor of this method.
-    ///
-    /// # Safety
-    ///
-    /// It is the callers responsibility to uphold the contract of all `Series`
-    /// having an equal length, if not this may panic down the line.
-    pub unsafe fn new_no_length_checks(columns: Vec<Column>) -> PolarsResult<DataFrame> {
-        ensure_names_unique(&columns, |s| s.name().as_str())?;
-
-        Ok(if cfg!(debug_assertions) {
-            Self::new(columns).unwrap()
-        } else {
-            let height = Self::infer_height(&columns);
-            DataFrame {
-                height,
-                columns,
-                cached_schema: OnceLock::new(),
-            }
-        })
     }
 
     /// Shrink the capacity of this DataFrame to fit its length.
@@ -1845,7 +1818,9 @@ impl DataFrame {
         cols: &[PlSmallStr],
         schema: &Schema,
     ) -> PolarsResult<Vec<Column>> {
-        debug_ensure_matching_schema_names(schema, self.schema())?;
+        if cfg!(debug_assertions) {
+            ensure_matching_schema_names(schema, self.schema())?;
+        }
 
         cols.iter()
             .map(|name| {
@@ -3306,28 +3281,14 @@ impl DataFrame {
     }
 
     pub fn append_record_batch(&mut self, rb: RecordBatchT<ArrayRef>) -> PolarsResult<()> {
+        // @Optimize: this does a lot of unnecessary allocations. We should probably have a
+        // append_chunk or something like this. It is just quite difficult to make that safe.
+        let df = DataFrame::from(rb);
         polars_ensure!(
-            rb.arrays().len() == self.width(),
-            InvalidOperation: "attempt to extend dataframe of width {} with record batch of width {}",
-            self.width(),
-            rb.arrays().len(),
+            self.schema() == df.schema(),
+            SchemaMismatch: "cannot append record batch with different schema",
         );
-
-        if rb.height() == 0 {
-            return Ok(());
-        }
-
-        // SAFETY:
-        // - we don't adjust the names of the columns
-        // - each column gets appended the same number of rows, which is an invariant of
-        //   record_batch.
-        self.height += rb.height();
-        let columns = unsafe { self.get_columns_mut() };
-        for (col, arr) in columns.iter_mut().zip(rb.into_arrays()) {
-            let arr_series = Series::from_arrow_chunks(PlSmallStr::EMPTY, vec![arr])?.into_column();
-            col.append(&arr_series)?;
-        }
-
+        self.vstack_mut_owned_unchecked(df);
         Ok(())
     }
 }

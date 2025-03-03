@@ -1290,7 +1290,7 @@ class Expr:
         --------
         >>> df = pl.DataFrame({"a": [1, 1, 2]})
 
-        Create a Series with 3 nulls, append column a then rechunk
+        Create a Series with 3 nulls, append column `a`, then rechunk.
 
         >>> df.select(pl.repeat(None, 3).append(pl.col("a")).rechunk())
         shape: (6, 1)
@@ -1495,7 +1495,6 @@ class Expr:
         │ 1   ┆ 1       ┆ 1               │
         │ 2   ┆ 1       ┆ 2               │
         └─────┴─────────┴─────────────────┘
-
         """
         return self._from_pyexpr(self._pyexpr.cum_min(reverse))
 
@@ -2639,7 +2638,7 @@ class Expr:
             Number of indices to shift forward. If a negative value is passed, values
             are shifted in the opposite direction instead.
         fill_value
-            Fill the resulting null values with this value.
+            Fill the resulting null values with this scalar value.
 
         Notes
         -----
@@ -4217,7 +4216,7 @@ class Expr:
         constraints
             Column filters; use `name = value` to filter columns by the supplied value.
             Each constraint will behave the same as `pl.col(name).eq(value)`, and
-            will be implicitly joined with the other filter conditions using `&`.
+            be implicitly joined with the other filter conditions using `&`.
 
         Examples
         --------
@@ -4485,7 +4484,6 @@ class Expr:
         │ 0   ┆ 3   ┆ 0         │
         │ 3   ┆ 4   ┆ 12        │
         └─────┴─────┴───────────┘
-
         """
         if return_dtype is not None:
             return_dtype = parse_into_dtype(return_dtype)
@@ -5784,7 +5782,12 @@ class Expr:
         """
         return self.__xor__(other)
 
-    def is_in(self, other: Expr | Collection[Any] | Series) -> Expr:
+    def is_in(
+        self,
+        other: Expr | Collection[Any] | Series,
+        *,
+        nulls_equal: bool = False,
+    ) -> Expr:
         """
         Check if elements of this expression are present in the other Series.
 
@@ -5792,6 +5795,8 @@ class Expr:
         ----------
         other
             Series or sequence of primitive type.
+        nulls_equal : bool, default False
+            If True, treat null as a distinct value. Null values will not propagate.
 
         Returns
         -------
@@ -5821,7 +5826,7 @@ class Expr:
             other = F.lit(pl.Series(other))._pyexpr
         else:
             other = parse_into_expression(other)
-        return self._from_pyexpr(self._pyexpr.is_in(other))
+        return self._from_pyexpr(self._pyexpr.is_in(other, nulls_equal))
 
     def repeat_by(self, by: pl.Series | Expr | str | int) -> Expr:
         """
