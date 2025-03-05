@@ -6,15 +6,24 @@ use polars_parquet::read::RowGroupMetadata;
 use crate::predicates::{BatchStats, ColumnStats, ScanIOPredicate};
 
 /// Collect the statistics in a row-group
-pub(crate) fn collect_statistics(
+pub fn collect_statistics_with_live_columns(
     md: &RowGroupMetadata,
     schema: &ArrowSchema,
+    pl_schema: &SchemaRef,
+    live_columns: &PlIndexSet<PlSmallStr>,
 ) -> PolarsResult<Option<BatchStats>> {
     // TODO! fix this performance. This is a full sequential scan.
-    let stats = schema
-        .iter_values()
-        .map(|field| {
-            let mut iter = md.columns_under_root_iter(&field.name).unwrap();
+    let stats = live_columns
+        .iter()
+        .map(|c| {
+            let field = schema.get(c).unwrap();
+
+            let default_fn = || ColumnStats::new(field.into(), None, None, None);
+
+            // This can be None in the allow_missing_columns case.
+            let Some(mut iter) = md.columns_under_root_iter(&field.name) else {
+                return Ok(default_fn());
+            };
 
             let statistics = deserialize(field, &mut iter)?;
             assert!(iter.next().is_none());
@@ -22,7 +31,64 @@ pub(crate) fn collect_statistics(
             // We don't support reading nested statistics for now. It does not really make any
             // sense at the moment with how we structure statistics.
             let Some(Statistics::Column(stats)) = statistics else {
-                return Ok(ColumnStats::new(field.into(), None, None, None));
+                return Ok(default_fn());
+            };
+
+            let stats = stats.into_arrow()?;
+
+            let null_count = stats
+                .null_count
+                .map(|x| Scalar::from(x).into_series(PlSmallStr::EMPTY));
+            let min_value = stats
+                .min_value
+                .map(|x| Series::try_from((PlSmallStr::EMPTY, x)).unwrap());
+            let max_value = stats
+                .max_value
+                .map(|x| Series::try_from((PlSmallStr::EMPTY, x)).unwrap());
+
+            Ok(ColumnStats::new(
+                field.into(),
+                null_count,
+                min_value,
+                max_value,
+            ))
+        })
+        .collect::<PolarsResult<Vec<_>>>()?;
+
+    if stats.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(BatchStats::new(
+        pl_schema.clone(),
+        stats,
+        Some(md.num_rows()),
+    )))
+}
+
+/// Collect the statistics in a row-group
+pub fn collect_statistics(
+    md: &RowGroupMetadata,
+    schema: &ArrowSchema,
+) -> PolarsResult<Option<BatchStats>> {
+    // TODO! fix this performance. This is a full sequential scan.
+    let stats = schema
+        .iter_values()
+        .map(|field| {
+            let default_fn = || ColumnStats::new(field.into(), None, None, None);
+
+            // This can be None in the allow_missing_columns case.
+            let Some(mut iter) = md.columns_under_root_iter(&field.name) else {
+                return Ok(default_fn());
+            };
+
+            let statistics = deserialize(field, &mut iter)?;
+            assert!(iter.next().is_none());
+
+            // We don't support reading nested statistics for now. It does not really make any
+            // sense at the moment with how we structure statistics.
+            let Some(Statistics::Column(stats)) = statistics else {
+                return Ok(default_fn());
             };
 
             let stats = stats.into_arrow()?;
@@ -68,8 +134,8 @@ pub fn read_this_row_group(
 
     let mut should_read = true;
 
-    if let Some(pred) = predicate {
-        if let Some(pred) = &pred.skip_batch_predicate {
+    if let Some(predicate) = predicate {
+        if let Some(pred) = &predicate.skip_batch_predicate {
             if let Some(stats) = collect_statistics(md, schema)? {
                 let stats = PlIndexMap::from_iter(stats.column_stats().iter().map(|col| {
                     (
@@ -86,7 +152,11 @@ pub fn read_this_row_group(
                         },
                     )
                 }));
-                let pred_result = pred.can_skip_batch(md.num_rows() as IdxSize, stats);
+                let pred_result = pred.can_skip_batch(
+                    md.num_rows() as IdxSize,
+                    predicate.live_columns.as_ref(),
+                    stats,
+                );
 
                 // a parquet file may not have statistics of all columns
                 match pred_result {
@@ -97,7 +167,7 @@ pub fn read_this_row_group(
                     _ => {},
                 }
             }
-        } else if let Some(pred) = pred.predicate.as_stats_evaluator() {
+        } else if let Some(pred) = predicate.predicate.as_stats_evaluator() {
             if let Some(stats) = collect_statistics(md, schema)? {
                 let pred_result = pred.should_read(&stats);
 

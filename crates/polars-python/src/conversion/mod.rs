@@ -22,7 +22,7 @@ use polars_core::utils::materialize_dyn_int;
 use polars_lazy::prelude::*;
 #[cfg(feature = "parquet")]
 use polars_parquet::write::StatisticsOptions;
-use polars_plan::plans::ScanSources;
+use polars_plan::dsl::ScanSources;
 use polars_utils::mmap::MemSlice;
 use polars_utils::pl_str::PlSmallStr;
 use polars_utils::total_ord::{TotalEq, TotalHash};
@@ -570,7 +570,7 @@ impl<'py> FromPyObject<'py> for Wrap<ScanSources> {
             },
             PythonScanSourceInput::File(file) => {
                 let mut sources = Vec::with_capacity(num_items);
-                sources.push(file);
+                sources.push(file.into());
                 MutableSources::Files(sources)
             },
             PythonScanSourceInput::Buffer(buffer) => {
@@ -583,7 +583,7 @@ impl<'py> FromPyObject<'py> for Wrap<ScanSources> {
         for source in iter {
             match (&mut sources, source?) {
                 (MutableSources::Paths(v), PythonScanSourceInput::Path(p)) => v.push(p),
-                (MutableSources::Files(v), PythonScanSourceInput::File(f)) => v.push(f),
+                (MutableSources::Files(v), PythonScanSourceInput::File(f)) => v.push(f.into()),
                 (MutableSources::Buffers(v), PythonScanSourceInput::Buffer(f)) => v.push(f),
                 _ => {
                     return Err(PyTypeError::new_err(

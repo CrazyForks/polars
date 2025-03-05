@@ -22,6 +22,7 @@ pub mod floor_divmod;
 pub mod functions;
 pub mod hashing;
 pub mod idx_map;
+pub mod idx_mapper;
 pub mod idx_vec;
 pub mod mem;
 pub mod min_max;
@@ -36,6 +37,7 @@ pub mod sys;
 pub mod total_ord;
 
 pub use functions::*;
+pub mod file;
 
 pub mod aliases;
 pub mod fixedringbuffer;
@@ -57,6 +59,7 @@ pub mod partitioned;
 
 pub use index::{IdxSize, NullableIdxSize};
 pub use io::*;
+pub use pl_str::unique_column_name;
 
 #[cfg(feature = "python")]
 pub mod python_function;
