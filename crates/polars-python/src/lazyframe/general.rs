@@ -20,6 +20,7 @@ use pyo3::types::{PyDict, PyDictMethods, PyList};
 use super::{PyLazyFrame, PyOptFlags, SinkTarget};
 use crate::error::PyPolarsErr;
 use crate::expr::ToExprs;
+use crate::expr::datatype::PyDataTypeExpr;
 use crate::interop::arrow::to_rust::pyarrow_schema_to_rust;
 use crate::io::PyScanOptions;
 use crate::lazyframe::visit::NodeTraverser;
@@ -522,7 +523,6 @@ impl PyLazyFrame {
         comm_subexpr_elim: bool,
         cluster_with_columns: bool,
         collapse_joins: bool,
-        streaming: bool,
         _eager: bool,
         _check_order: bool,
         #[allow(unused_variables)] new_streaming: bool,
@@ -539,11 +539,6 @@ impl PyLazyFrame {
             .with_check_order(_check_order)
             ._with_eager(_eager)
             .with_projection_pushdown(projection_pushdown);
-
-        #[cfg(feature = "streaming")]
-        {
-            ldf = ldf.with_streaming(streaming);
-        }
 
         #[cfg(feature = "new_streaming")]
         {
@@ -706,7 +701,7 @@ impl PyLazyFrame {
         })
     }
 
-    #[cfg(all(feature = "streaming", feature = "parquet"))]
+    #[cfg(feature = "parquet")]
     #[pyo3(signature = (
         target, compression, compression_level, statistics, row_group_size, data_page_size,
         cloud_options, credential_provider, retries, sink_options, metadata, field_overwrites,
@@ -778,7 +773,7 @@ impl PyLazyFrame {
         .map_err(Into::into)
     }
 
-    #[cfg(all(feature = "streaming", feature = "ipc"))]
+    #[cfg(feature = "ipc")]
     #[pyo3(signature = (
         target, compression, compat_level, cloud_options, credential_provider, retries,
         sink_options
@@ -843,7 +838,7 @@ impl PyLazyFrame {
         .map_err(Into::into)
     }
 
-    #[cfg(all(feature = "streaming", feature = "csv"))]
+    #[cfg(feature = "csv")]
     #[pyo3(signature = (
         target, include_bom, include_header, separator, line_terminator, quote_char, batch_size,
         datetime_format, date_format, time_format, float_scientific, float_precision, null_value,
@@ -938,7 +933,7 @@ impl PyLazyFrame {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[cfg(all(feature = "streaming", feature = "json"))]
+    #[cfg(feature = "json")]
     #[pyo3(signature = (target, cloud_options, credential_provider, retries, sink_options))]
     fn sink_json(
         &self,
@@ -1507,7 +1502,7 @@ impl PyLazyFrame {
         opt.set(OptFlags::PREDICATE_PUSHDOWN, predicate_pushdown);
         opt.set(OptFlags::PROJECTION_PUSHDOWN, projection_pushdown);
         opt.set(OptFlags::SLICE_PUSHDOWN, slice_pushdown);
-        opt.set(OptFlags::STREAMING, streamable);
+        opt.set(OptFlags::NEW_STREAMING, streamable);
 
         self.ldf
             .clone()
@@ -1537,8 +1532,8 @@ impl PyLazyFrame {
         self.ldf.clone().cast(cast_map, strict).into()
     }
 
-    fn cast_all(&self, dtype: Wrap<DataType>, strict: bool) -> Self {
-        self.ldf.clone().cast_all(dtype.0, strict).into()
+    fn cast_all(&self, dtype: PyDataTypeExpr, strict: bool) -> Self {
+        self.ldf.clone().cast_all(dtype.inner, strict).into()
     }
 
     fn clone(&self) -> Self {
