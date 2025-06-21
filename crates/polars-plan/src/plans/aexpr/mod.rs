@@ -1,4 +1,6 @@
+mod builder;
 mod evaluate;
+mod function_expr;
 #[cfg(feature = "cse")]
 mod hash;
 mod minterm_iter;
@@ -9,6 +11,7 @@ mod traverse;
 
 use std::hash::{Hash, Hasher};
 
+pub use function_expr::*;
 #[cfg(feature = "cse")]
 pub(super) use hash::traverse_and_hash_aexpr;
 pub use minterm_iter::MintermIter;
@@ -18,11 +21,11 @@ use polars_core::prelude::*;
 use polars_core::utils::{get_time_units, try_get_supertype};
 use polars_utils::arena::{Arena, Node};
 pub use scalar::is_scalar_ae;
-#[cfg(feature = "ir_serde")]
-use serde::{Deserialize, Serialize};
 use strum_macros::IntoStaticStr;
 pub use traverse::*;
 mod properties;
+pub use aexpr::function_expr::schema::FieldsMapper;
+pub use builder::AExprBuilder;
 pub use properties::*;
 
 use crate::constants::LEN;
@@ -30,7 +33,7 @@ use crate::plans::Context;
 use crate::prelude::*;
 
 #[derive(Clone, Debug, IntoStaticStr)]
-#[cfg_attr(feature = "ir_serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "ir_serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum IRAggExpr {
     Min {
         input: Node,
@@ -141,13 +144,12 @@ impl From<IRAggExpr> for GroupByMethod {
 
 /// IR expression node that is allocated in an [`Arena`][polars_utils::arena::Arena].
 #[derive(Clone, Debug, Default)]
-#[cfg_attr(feature = "ir_serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "ir_serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AExpr {
     Explode {
         expr: Node,
         skip_empty: bool,
     },
-    Alias(Node, PlSmallStr),
     Column(PlSmallStr),
     Literal(LiteralValue),
     BinaryExpr {
@@ -189,6 +191,7 @@ pub enum AExpr {
         function: OpaqueColumnUdf,
         output_type: GetOutput,
         options: FunctionOptions,
+        fmt_str: Box<PlSmallStr>,
     },
     /// Evaluates the `evaluation` expression on the output of the `expr`.
     ///
@@ -209,7 +212,7 @@ pub enum AExpr {
         /// Therefor we need [`ExprIr`].
         input: Vec<ExprIR>,
         /// function to apply
-        function: FunctionExpr,
+        function: IRFunctionExpr,
         options: FunctionOptions,
     },
     Window {

@@ -82,6 +82,7 @@ from polars.datatypes import (
     UInt64,
     Unknown,
     is_polars_dtype,
+    parse_into_datatype_expr,
     parse_into_dtype,
 )
 from polars.datatypes.group import DataTypeGroup
@@ -199,8 +200,7 @@ def _gpu_engine_callback(
 ) -> Callable[[Any, int | None], None] | None:
     is_gpu = (is_config_obj := isinstance(engine, GPUEngine)) or engine == "gpu"
     if not (
-        is_config_obj
-        or engine in ("auto", "cpu", "in-memory", "streaming", "old-streaming", "gpu")
+        is_config_obj or engine in ("auto", "cpu", "in-memory", "streaming", "gpu")
     ):
         msg = f"Invalid engine argument {engine=}"
         raise ValueError(msg)
@@ -1283,14 +1283,12 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
 
         engine = _select_engine(engine)
 
-        if engine in ("streaming", "old-streaming"):
+        if engine == "streaming":
             issue_unstable_warning("streaming mode is considered unstable.")
 
         if optimized:
             optimizations = optimizations.__copy__()
             optimizations._pyoptflags.streaming = engine == "streaming"
-            optimizations._pyoptflags.old_streaming = engine == "old-streaming"  # type: ignore[comparison-overlap]
-
             ldf = self._ldf.with_optimizations(optimizations._pyoptflags)
             if format == "tree":
                 return ldf.describe_optimized_plan_tree()
@@ -1434,11 +1432,10 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         """
         engine = _select_engine(engine)
 
-        if engine in ("streaming", "old-streaming"):
+        if engine == "streaming":
             issue_unstable_warning("streaming mode is considered unstable.")
 
         optimizations = optimizations.__copy__()
-        optimizations._pyoptflags.old_streaming = engine == "old-streaming"  # type: ignore[comparison-overlap]
         optimizations._pyoptflags.streaming = engine == "streaming"
         _ldf = self._ldf.with_optimizations(optimizations._pyoptflags)
 
@@ -2009,12 +2006,11 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         engine = _select_engine(engine)
 
         optimizations = optimizations.__copy__()
-        optimizations._pyoptflags.old_streaming = engine == "old-streaming"  # type: ignore[comparison-overlap]
         ldf = self._ldf.with_optimizations(optimizations._pyoptflags)
 
         callback = _gpu_engine_callback(
             engine,
-            streaming=engine == "old-streaming",  # type: ignore[comparison-overlap]
+            streaming=False,
             background=False,
             new_streaming=False,
             _eager=False,
@@ -2312,12 +2308,12 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         if new_streaming:
             engine = "streaming"
 
-        if engine in ("old-streaming", "streaming"):
+        if engine == "streaming":
             issue_unstable_warning("streaming mode is considered unstable.")
 
         callback = _gpu_engine_callback(
             engine,
-            streaming=engine == "old-streaming",  # type: ignore[comparison-overlap]
+            streaming=False,
             background=background,
             new_streaming=new_streaming,
             _eager=optimizations._pyoptflags.eager,
@@ -2445,7 +2441,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         """
         engine = _select_engine(engine)
 
-        if engine in ("streaming", "old-streaming"):
+        if engine == "streaming":
             issue_unstable_warning("streaming mode is considered unstable.")
 
         ldf = self._ldf.with_optimizations(optimizations._pyoptflags)
@@ -3033,6 +3029,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         time_format: str | None = None,
         float_scientific: bool | None = None,
         float_precision: int | None = None,
+        decimal_comma: bool = False,
         null_value: str | None = None,
         quote_style: CsvQuoteStyle | None = None,
         maintain_order: bool = True,
@@ -3064,6 +3061,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         time_format: str | None = None,
         float_scientific: bool | None = None,
         float_precision: int | None = None,
+        decimal_comma: bool = False,
         null_value: str | None = None,
         quote_style: CsvQuoteStyle | None = None,
         maintain_order: bool = True,
@@ -3094,6 +3092,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         time_format: str | None = None,
         float_scientific: bool | None = None,
         float_precision: int | None = None,
+        decimal_comma: bool = False,
         null_value: str | None = None,
         quote_style: CsvQuoteStyle | None = None,
         maintain_order: bool = True,
@@ -3149,6 +3148,9 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         float_precision
             Number of decimal places to write, applied to both `Float32` and
             `Float64` datatypes.
+        decimal_comma
+            Use a comma as the decimal separator instead of a point. Floats will be
+            encapsulated in quotes if necessary; set the field separator to override.
         null_value
             A string representing null values (defaulting to the empty string).
         quote_style : {'necessary', 'always', 'non_numeric', 'never'}
@@ -3290,6 +3292,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
             time_format=time_format,
             float_scientific=float_scientific,
             float_precision=float_precision,
+            decimal_comma=decimal_comma,
             null_value=null_value,
             quote_style=quote_style,
             cloud_options=storage_options,
@@ -3646,7 +3649,6 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
             comm_subexpr_elim=comm_subexpr_elim,
             cluster_with_columns=cluster_with_columns,
             collapse_joins=collapse_joins,
-            streaming=False,
             _eager=False,
             _check_order=_check_order,
             new_streaming=False,
@@ -3693,6 +3695,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
                 ColumnNameOrSelector | PolarsDataType, PolarsDataType | PythonDataType
             ]
             | PolarsDataType
+            | pl.DataTypeExpr
         ),
         *,
         strict: bool = True,
@@ -3771,8 +3774,8 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
          'ham': ['2020-01-02', '2021-03-04', '2022-05-06']}
         """
         if not isinstance(dtypes, Mapping):
-            dtypes = parse_into_dtype(dtypes)
-            return self._from_pyldf(self._ldf.cast_all(dtypes, strict))
+            dtypes = parse_into_datatype_expr(dtypes)
+            return self._from_pyldf(self._ldf.cast_all(dtypes._pydatatype_expr, strict))
 
         cast_map = {}
         for c, dtype in dtypes.items():
@@ -4798,7 +4801,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
            - 1y    (1 calendar year)
            - 1i    (1 index count)
 
-           Or combine them:
+           Or combine them (except in `every`):
            "3d12h4m25s" # 3 days, 12 hours, 4 minutes, and 25 seconds
 
            By "calendar day", we mean the corresponding time on the next day (which may

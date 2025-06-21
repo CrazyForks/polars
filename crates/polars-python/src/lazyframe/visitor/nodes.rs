@@ -6,11 +6,11 @@ use polars_core::prelude::IdxSize;
 use polars_io::cloud::CloudOptions;
 use polars_ops::prelude::JoinType;
 use polars_plan::plans::IR;
-use polars_plan::prelude::{FileScan, FunctionIR, PythonPredicate, UnifiedScanArgs};
+use polars_plan::prelude::{FileScanIR, FunctionIR, PythonPredicate, UnifiedScanArgs};
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyString};
+use pyo3::types::{PyDict, PyList, PyString};
 
 use super::expr_nodes::PyGroupbyOptions;
 use crate::PyDataFrame;
@@ -18,12 +18,12 @@ use crate::lazyframe::visit::PyExprIR;
 
 fn scan_type_to_pyobject(
     py: Python<'_>,
-    scan_type: &FileScan,
+    scan_type: &FileScanIR,
     cloud_options: &Option<CloudOptions>,
 ) -> PyResult<PyObject> {
     match scan_type {
         #[cfg(feature = "csv")]
-        FileScan::Csv { options } => {
+        FileScanIR::Csv { options } => {
             let options = serde_json::to_string(options)
                 .map_err(|err| PyValueError::new_err(format!("{err:?}")))?;
             let cloud_options = serde_json::to_string(cloud_options)
@@ -31,7 +31,7 @@ fn scan_type_to_pyobject(
             Ok(("csv", options, cloud_options).into_py_any(py)?)
         },
         #[cfg(feature = "parquet")]
-        FileScan::Parquet { options, .. } => {
+        FileScanIR::Parquet { options, .. } => {
             let options = serde_json::to_string(options)
                 .map_err(|err| PyValueError::new_err(format!("{err:?}")))?;
             let cloud_options = serde_json::to_string(cloud_options)
@@ -39,17 +39,17 @@ fn scan_type_to_pyobject(
             Ok(("parquet", options, cloud_options).into_py_any(py)?)
         },
         #[cfg(feature = "ipc")]
-        FileScan::Ipc { .. } => Err(PyNotImplementedError::new_err("ipc scan")),
+        FileScanIR::Ipc { .. } => Err(PyNotImplementedError::new_err("ipc scan")),
         #[cfg(feature = "json")]
-        FileScan::NDJson { options, .. } => {
+        FileScanIR::NDJson { options, .. } => {
             let options = serde_json::to_string(options)
                 .map_err(|err| PyValueError::new_err(format!("{err:?}")))?;
             Ok(("ndjson", options).into_py_any(py)?)
         },
-        FileScan::PythonDataset { .. } => {
+        FileScanIR::PythonDataset { .. } => {
             Err(PyNotImplementedError::new_err("python dataset scan"))
         },
-        FileScan::Anonymous { .. } => Err(PyNotImplementedError::new_err("anonymous scan")),
+        FileScanIR::Anonymous { .. } => Err(PyNotImplementedError::new_err("anonymous scan")),
     }
 }
 
@@ -396,18 +396,35 @@ pub(crate) fn into_py(py: Python<'_>, plan: &IR) -> PyResult<PyObject> {
             scan_type,
             unified_scan_args,
             id: _,
-        } => Scan {
-            paths: sources
-                .into_paths()
-                .ok_or_else(|| PyNotImplementedError::new_err("scan with BytesIO"))?
-                .into_py_any(py)?,
-            // TODO: file info
-            file_info: py.None(),
-            predicate: predicate.as_ref().map(|e| e.into()),
-            file_options: PyFileOptions {
-                inner: (**unified_scan_args).clone(),
-            },
-            scan_type: scan_type_to_pyobject(py, scan_type, &unified_scan_args.cloud_options)?,
+        } => {
+            Scan {
+                paths: {
+                    let paths = sources
+                        .into_paths()
+                        .ok_or_else(|| PyNotImplementedError::new_err("scan with BytesIO"))?;
+
+                    let out = PyList::new(py, [] as [(); 0])?;
+
+                    // Manual conversion to preserve `uri://...` - converting Rust `Path` to `PosixPath`
+                    // will corrupt to `uri:/...`
+                    for path in paths.iter() {
+                        if let Some(path) = path.to_str() {
+                            out.append(path)?
+                        } else {
+                            out.append(path)?
+                        }
+                    }
+
+                    out.into_py_any(py)?
+                },
+                // TODO: file info
+                file_info: py.None(),
+                predicate: predicate.as_ref().map(|e| e.into()),
+                file_options: PyFileOptions {
+                    inner: (**unified_scan_args).clone(),
+                },
+                scan_type: scan_type_to_pyobject(py, scan_type, &unified_scan_args.cloud_options)?,
+            }
         }
         .into_py_any(py),
         IR::DataFrameScan {
@@ -587,11 +604,6 @@ pub(crate) fn into_py(py: Python<'_>, plan: &IR) -> PyResult<PyObject> {
                     streamable: _,
                     fmt_str: _,
                 } => return Err(PyNotImplementedError::new_err("opaque rust mapfunction")),
-                FunctionIR::Pipeline {
-                    function: _,
-                    schema: _,
-                    original: _,
-                } => return Err(PyNotImplementedError::new_err("pipeline mapfunction")),
                 FunctionIR::Unnest { columns } => (
                     "unnest",
                     columns.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
