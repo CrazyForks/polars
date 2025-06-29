@@ -125,7 +125,6 @@ pub enum Expr {
         input: Vec<Expr>,
         /// function to apply
         function: FunctionExpr,
-        options: FunctionOptions,
     },
     Explode {
         input: Arc<Expr>,
@@ -167,7 +166,11 @@ pub enum Expr {
         function: OpaqueColumnUdf,
         /// output dtype of the function
         output_type: GetOutput,
+
         options: FunctionOptions,
+        /// used for formatting
+        #[cfg_attr(any(feature = "serde", feature = "dsl-schema"), serde(skip))]
+        fmt_str: Box<PlSmallStr>,
     },
     /// Evaluates the `evaluation` expression on the output of the `expr`.
     ///
@@ -305,14 +308,9 @@ impl Hash for Expr {
                 truthy.hash(state);
                 falsy.hash(state);
             },
-            Expr::Function {
-                input,
-                function,
-                options,
-            } => {
+            Expr::Function { input, function } => {
                 input.hash(state);
                 std::mem::discriminant(function).hash(state);
-                options.hash(state);
             },
             Expr::Gather {
                 expr,
@@ -372,9 +370,11 @@ impl Hash for Expr {
                 function: _,
                 output_type: _,
                 options,
+                fmt_str,
             } => {
                 input.hash(state);
                 options.hash(state);
+                fmt_str.hash(state);
             },
             Expr::Eval {
                 expr: input,
@@ -421,10 +421,10 @@ impl Expr {
         ctxt: Context,
         expr_arena: &mut Arena<AExpr>,
     ) -> PolarsResult<Field> {
-        let root = to_aexpr(self.clone(), expr_arena, schema)?;
-        expr_arena
-            .get(root)
-            .to_field_and_validate(schema, ctxt, expr_arena)
+        let expr = to_expr_ir(self.clone(), expr_arena, schema)?;
+        let (node, output_name) = expr.into_inner();
+        let dtype = expr_arena.get(node).to_dtype(schema, ctxt, expr_arena)?;
+        Ok(Field::new(output_name.into_inner().unwrap(), dtype))
     }
 
     /// Extract a constant usize from an expression.
@@ -435,6 +435,30 @@ impl Expr {
                 // lit(x, dtype=...) are Cast expressions. We verify the inner expression is literal.
                 if dtype.as_literal().is_some_and(|dt| dt.is_integer()) {
                     expr.extract_usize()
+                } else {
+                    polars_bail!(InvalidOperation: "expression must be constant literal to extract integer")
+                }
+            },
+            _ => {
+                polars_bail!(InvalidOperation: "expression must be constant literal to extract integer")
+            },
+        }
+    }
+
+    pub fn extract_i64(&self) -> PolarsResult<i64> {
+        match self {
+            Expr::Literal(n) => n.extract_i64(),
+            Expr::BinaryExpr { left, op, right } => match op {
+                Operator::Minus => {
+                    let left = left.extract_i64()?;
+                    let right = right.extract_i64()?;
+                    Ok(left - right)
+                },
+                _ => unreachable!(),
+            },
+            Expr::Cast { expr, dtype, .. } => {
+                if dtype.as_literal().is_some_and(|dt| dt.is_integer()) {
+                    expr.extract_i64()
                 } else {
                     polars_bail!(InvalidOperation: "expression must be constant literal to extract integer")
                 }
@@ -490,12 +514,7 @@ impl Expr {
     #[inline]
     pub fn n_ary(function: impl Into<FunctionExpr>, input: Vec<Expr>) -> Expr {
         let function = function.into();
-        let options = function.function_options();
-        Expr::Function {
-            input,
-            function,
-            options,
-        }
+        Expr::Function { input, function }
     }
 }
 

@@ -2,7 +2,6 @@ use polars_utils::idx_vec::UnitVec;
 use polars_utils::unitvec;
 
 use super::*;
-use crate::constants::MAP_LIST_NAME;
 
 impl AExpr {
     pub(crate) fn is_leaf(&self) -> bool {
@@ -29,7 +28,7 @@ impl AExpr {
                 EvalVariant::Cumulative { min_samples: _ } => false,
             },
 
-            Alias(_, _) | BinaryExpr { .. } | Column(_) | Ternary { .. } | Cast { .. } => true,
+            BinaryExpr { .. } | Column(_) | Ternary { .. } | Cast { .. } => true,
 
             Agg { .. }
             | Explode { .. }
@@ -46,7 +45,9 @@ impl AExpr {
     pub(crate) fn does_not_modify_top_level(&self) -> bool {
         match self {
             AExpr::Column(_) => true,
-            AExpr::Function { function, .. } => matches!(function, FunctionExpr::SetSortedFlag(_)),
+            AExpr::Function { function, .. } => {
+                matches!(function, IRFunctionExpr::SetSortedFlag(_))
+            },
             _ => false,
         }
     }
@@ -112,7 +113,7 @@ pub fn is_elementwise(stack: &mut UnitVec<Node>, ae: &AExpr, expr_arena: &Arena<
         // for inspection. (e.g. `is_in(<literal>)`).
         #[cfg(feature = "is_in")]
         Function {
-            function: FunctionExpr::Boolean(BooleanFunction::IsIn { .. }),
+            function: IRFunctionExpr::Boolean(IRBooleanFunction::IsIn { .. }),
             input,
             ..
         } => (|| {
@@ -217,19 +218,19 @@ impl ExprPushdownGroup {
                     // Rows that go OOB on get/gather may be filtered out in earlier operations,
                     // so we don't push these down.
                     AExpr::Function {
-                        function: FunctionExpr::ListExpr(ListFunction::Get(false)),
+                        function: IRFunctionExpr::ListExpr(IRListFunction::Get(false)),
                         ..
                     } => true,
 
                     #[cfg(feature = "list_gather")]
                     AExpr::Function {
-                        function: FunctionExpr::ListExpr(ListFunction::Gather(false)),
+                        function: IRFunctionExpr::ListExpr(IRListFunction::Gather(false)),
                         ..
                     } => true,
 
                     #[cfg(feature = "dtype-array")]
                     AExpr::Function {
-                        function: FunctionExpr::ArrayExpr(ArrayFunction::Get(false)),
+                        function: IRFunctionExpr::ArrayExpr(IRArrayFunction::Get(false)),
                         ..
                     } => true,
 
@@ -237,7 +238,7 @@ impl ExprPushdownGroup {
                     AExpr::Function {
                         input,
                         function:
-                            FunctionExpr::StringExpr(StringFunction::Strptime(_, strptime_options)),
+                            IRFunctionExpr::StringExpr(IRStringFunction::Strptime(_, strptime_options)),
                         ..
                     } => {
                         debug_assert!(input.len() <= 2);
@@ -253,16 +254,6 @@ impl ExprPushdownGroup {
                             _ => strptime_options.strict,
                         }
                     },
-                    #[cfg(feature = "python")]
-                    // This is python `map_elements`. This is a hack because that function breaks
-                    // the Polars model. It should be elementwise. This must be fixed.
-                    AExpr::AnonymousFunction { options, .. }
-                        if options.flags.contains(FunctionFlags::APPLY_LIST)
-                            && options.fmt_str == MAP_LIST_NAME =>
-                    {
-                        return self;
-                    },
-
                     AExpr::Cast {
                         expr,
                         dtype: _,
@@ -412,5 +403,134 @@ pub fn can_pre_agg(agg: Node, expr_arena: &Arena<AExpr>, _input_schema: &Schema)
             can_partition
         },
         _ => false,
+    }
+}
+
+/// Identifies columns that are guaranteed to be non-NULL after applying this filter.
+///
+/// This is conservative in that it will not give false positives, but may not identify all columns.
+///
+/// Note, this must be called with the root node of filter expressions (the root nodes after splitting
+/// with MintermIter is also allowed).
+pub(crate) fn predicate_non_null_column_outputs(
+    predicate_node: Node,
+    expr_arena: &Arena<AExpr>,
+    non_null_column_callback: &mut dyn FnMut(&PlSmallStr),
+) {
+    let mut minterm_iter = MintermIter::new(predicate_node, expr_arena);
+    let stack: &mut UnitVec<Node> = &mut unitvec![];
+
+    /// Only traverse the first input, e.g. `A.is_in(B)` we don't consider B.
+    macro_rules! traverse_first_input {
+        // &[ExprIR]
+        ($inputs:expr) => {{
+            if let Some(expr_ir) = $inputs.first() {
+                stack.push(expr_ir.node())
+            }
+
+            false
+        }};
+    }
+
+    loop {
+        use AExpr::*;
+
+        let node = if let Some(node) = stack.pop() {
+            node
+        } else if let Some(minterm_node) = minterm_iter.next() {
+            // Some additional leaf exprs can be pruned.
+            match expr_arena.get(minterm_node) {
+                Function {
+                    input,
+                    function: IRFunctionExpr::Boolean(IRBooleanFunction::IsNotNull),
+                    options: _,
+                } if !input.is_empty() => input.first().unwrap().node(),
+
+                Function {
+                    input,
+                    function: IRFunctionExpr::Boolean(IRBooleanFunction::Not),
+                    options: _,
+                } if !input.is_empty() => match expr_arena.get(input.first().unwrap().node()) {
+                    Function {
+                        input,
+                        function: IRFunctionExpr::Boolean(IRBooleanFunction::IsNull),
+                        options: _,
+                    } if !input.is_empty() => input.first().unwrap().node(),
+
+                    _ => minterm_node,
+                },
+
+                _ => minterm_node,
+            }
+        } else {
+            break;
+        };
+
+        let ae = expr_arena.get(node);
+
+        // This match we traverse a subset of the operations that are guaranteed to maintain NULLs.
+        //
+        // This must not catch any operations that materialize NULLs, as otherwise e.g.
+        // `e.fill_null(False) >= False` will include NULLs
+        let traverse_all_inputs = match ae {
+            BinaryExpr {
+                left: _,
+                op,
+                right: _,
+            } => {
+                use Operator::*;
+
+                match op {
+                    Eq | NotEq | Lt | LtEq | Gt | GtEq | Plus | Minus | Multiply | Divide
+                    | TrueDivide | FloorDivide | Modulus | Xor => true,
+
+                    // These can turn NULLs into true/false. E.g.:
+                    // * (L & False) >= False becomes True
+                    // * L | True becomes True
+                    EqValidity | NotEqValidity | Or | LogicalOr | And | LogicalAnd => false,
+                }
+            },
+
+            Cast { dtype, .. } => {
+                // Forbid nested types, it's currently buggy:
+                // >>> pl.select(a=pl.lit(None), b=pl.lit(None).cast(pl.Struct({})))
+                // | a    | b         |
+                // | ---  | ---       |
+                // | null | struct[0] |
+                // |------|-----------|
+                // | null | {}        |
+                //
+                // (issue at https://github.com/pola-rs/polars/issues/23276)
+                !dtype.is_nested()
+            },
+
+            Function {
+                input,
+                function: _,
+                options,
+            } => {
+                if options
+                    .flags
+                    .contains(FunctionFlags::PRESERVES_NULL_FIRST_INPUT)
+                {
+                    traverse_first_input!(input)
+                } else {
+                    options
+                        .flags
+                        .contains(FunctionFlags::PRESERVES_NULL_ALL_INPUTS)
+                }
+            },
+
+            Column(name) => {
+                non_null_column_callback(name);
+                false
+            },
+
+            _ => false,
+        };
+
+        if traverse_all_inputs {
+            ae.inputs_rev(stack);
+        }
     }
 }

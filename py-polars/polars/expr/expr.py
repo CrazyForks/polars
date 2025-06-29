@@ -42,7 +42,11 @@ from polars._utils.various import (
     sphinx_accessor,
     warn_null_comparison,
 )
-from polars.datatypes import Int64, is_polars_dtype, parse_into_dtype
+from polars.datatypes import (
+    Int64,
+    is_polars_dtype,
+    parse_into_datatype_expr,
+)
 from polars.dependencies import _check_for_numpy
 from polars.dependencies import numpy as np
 from polars.exceptions import (
@@ -475,11 +479,12 @@ class Expr:
         Parameters
         ----------
         ignore_nulls
-            Ignore null values (default).
 
-            If set to `False`, `Kleene logic`_ is used to deal with nulls:
-            if the column contains any null values and no `True` values,
-            the output is null.
+            * If set to `True` (default), null values are ignored. If there
+              are no non-null values, the output is `False`.
+            * If set to `False`, `Kleene logic`_ is used to deal with nulls:
+              if the column contains any null values and no `True` values,
+              the output is null.
 
             .. _Kleene logic: https://en.wikipedia.org/wiki/Three-valued_logic
 
@@ -534,11 +539,12 @@ class Expr:
         Parameters
         ----------
         ignore_nulls
-            Ignore null values (default).
 
-            If set to `False`, `Kleene logic`_ is used to deal with nulls:
-            if the column contains any null values and no `False` values,
-            the output is null.
+            * If set to `True` (default), null values are ignored. If there
+              are no non-null values, the output is `True`.
+            * If set to `False`, `Kleene logic`_ is used to deal with nulls:
+              if the column contains any null values and no `False` values,
+              the output is null.
 
             .. _Kleene logic: https://en.wikipedia.org/wiki/Three-valued_logic
 
@@ -1801,7 +1807,7 @@ class Expr:
 
     def cast(
         self,
-        dtype: PolarsDataType | type[Any],
+        dtype: PolarsDataType | pl.DataTypeExpr | type[Any],
         *,
         strict: bool = True,
         wrap_numerical: bool = False,
@@ -1843,8 +1849,10 @@ class Expr:
         │ 3.0 ┆ 6   │
         └─────┴─────┘
         """
-        dtype = parse_into_dtype(dtype)
-        return self._from_pyexpr(self._pyexpr.cast(dtype, strict, wrap_numerical))
+        dtype = parse_into_datatype_expr(dtype)
+        return self._from_pyexpr(
+            self._pyexpr.cast(dtype._pydatatype_expr, strict, wrap_numerical)
+        )
 
     def sort(self, *, descending: bool = False, nulls_last: bool = False) -> Expr:
         """
@@ -3145,8 +3153,12 @@ class Expr:
 
         Notes
         -----
-        Dtypes in {Int8, UInt8, Int16, UInt16} are cast to
-        Int64 before summing to prevent overflow issues.
+        * Dtypes in {Int8, UInt8, Int16, UInt16} are cast to
+          Int64 before summing to prevent overflow issues.
+        * If there are no non-null values, then the output is `0`.
+          If you would prefer empty sums to return `None`, you can
+          use `pl.when(expr.count()>0).then(expr.sum())` instead
+          of `expr.sum()`.
 
         Examples
         --------
@@ -3204,6 +3216,13 @@ class Expr:
     def product(self) -> Expr:
         """
         Compute the product of an expression.
+
+        Notes
+        -----
+        If there are no non-null values, then the output is `1`.
+        If you would prefer empty products to return `None`, you can
+        use `pl.when(expr.count()>0).then(expr.product())` instead
+        of `expr.product()`.
 
         Examples
         --------
@@ -4348,21 +4367,20 @@ class Expr:
         def __init__(
             self,
             function: Callable[[Series], Series | Any],
-            return_dtype: PolarsDataType | None,
         ) -> None:
             self.function = function
-            self.return_dtype = return_dtype
 
         def __call__(self, *args: Any, **kwargs: Any) -> Any:
+            return_dtype = kwargs.pop("return_dtype")
             result = self.function(*args, **kwargs)
             if _check_for_numpy(result) and isinstance(result, np.ndarray):
-                result = pl.Series(result, dtype=self.return_dtype)
+                result = pl.Series(result, dtype=return_dtype)
             return result
 
     def map_batches(
         self,
         function: Callable[[Series], Series | Any],
-        return_dtype: PolarsDataType | None = None,
+        return_dtype: PolarsDataType | pl.DataTypeExpr | None = None,
         *,
         agg_list: bool = False,
         is_elementwise: bool = False,
@@ -4389,10 +4407,11 @@ class Expr:
             If not set, the dtype will be inferred based on the first non-null value
             that is returned by the function.
         agg_list
-            Aggregate the values of the expression into a list before applying the
-            function. This parameter only works in a group-by context.
-            The function will be invoked only once on a list of groups, rather than
-            once per group.
+            First implode when in a group-by aggregation.
+
+            .. deprecated:: 1.32.0
+
+                Use `expr.implode().map_batches(..)` instead.
         is_elementwise
             If set to true this can run in the streaming engine, but may yield
             incorrect results in group-by. Ensure you know what you are doing!
@@ -4405,7 +4424,8 @@ class Expr:
         Warnings
         --------
         If `return_dtype` is not provided, this may lead to unexpected results.
-        We allow this, but it is considered a bug in the user's query.
+        We allow this, but it is considered a bug in the user's query. In the
+        future this will raise in `Lazy` queries.
 
         See Also
         --------
@@ -4429,48 +4449,6 @@ class Expr:
         ╞══════╪════════╡
         │ 1    ┆ 0      │
         └──────┴────────┘
-
-        In a group-by context, the `agg_list` parameter can improve performance if used
-        correctly. The following example has `agg_list` set to `False`, which causes
-        the function to be applied once per group. The input of the function is a
-        Series of type `Int64`. This is less efficient.
-
-        >>> df = pl.DataFrame(
-        ...     {
-        ...         "a": [0, 1, 0, 1],
-        ...         "b": [1, 2, 3, 4],
-        ...     }
-        ... )
-        >>> df.group_by("a").agg(
-        ...     pl.col("b").map_batches(lambda x: x + 2, agg_list=False)
-        ... )  # doctest: +IGNORE_RESULT
-        shape: (2, 2)
-        ┌─────┬───────────┐
-        │ a   ┆ b         │
-        │ --- ┆ ---       │
-        │ i64 ┆ list[i64] │
-        ╞═════╪═══════════╡
-        │ 1   ┆ [4, 6]    │
-        │ 0   ┆ [3, 5]    │
-        └─────┴───────────┘
-
-        Using `agg_list=True` would be more efficient. In this example, the input of
-        the function is a Series of type `List(Int64)`.
-
-        >>> df.group_by("a").agg(
-        ...     pl.col("b").map_batches(
-        ...         lambda x: x.list.eval(pl.element() + 2), agg_list=True
-        ...     )
-        ... )  # doctest: +IGNORE_RESULT
-        shape: (2, 2)
-        ┌─────┬───────────┐
-        │ a   ┆ b         │
-        │ --- ┆ ---       │
-        │ i64 ┆ list[i64] │
-        ╞═════╪═══════════╡
-        │ 0   ┆ [3, 5]    │
-        │ 1   ┆ [4, 6]    │
-        └─────┴───────────┘
 
         Here's an example of a function that returns a scalar, where we want it
         to stay as a scalar:
@@ -4520,14 +4498,19 @@ class Expr:
         │ 3   ┆ 4   ┆ 12        │
         └─────┴─────┴───────────┘
         """
+        if agg_list:
+            msg = f"""using 'agg_list=True' is deprecated and will be removed in 2.0
+
+Consider using {self}.implode() instead"""
+            raise DeprecationWarning(msg)
+            self = self.implode()
         if return_dtype is not None:
-            return_dtype = parse_into_dtype(return_dtype)
+            return_dtype = parse_into_datatype_expr(return_dtype)._pydatatype_expr
 
         return self._from_pyexpr(
             self._pyexpr.map_batches(
-                self._map_batches_wrapper(function, return_dtype),
+                self._map_batches_wrapper(function),
                 return_dtype,
-                agg_list,
                 is_elementwise,
                 returns_scalar,
             )
@@ -4563,19 +4546,6 @@ class Expr:
             consider :meth:`.with_columns <polars.DataFrame.with_columns>`
             and :meth:`.with_fields <polars.Expr.struct.with_fields>`.
 
-        The UDF is applied to each element of a column. Note that, in a GroupBy
-        context, the column will have been pre-aggregated and so each element
-        will itself be a Series. Therefore, depending on the context,
-        requirements for `function` differ:
-
-        * Selection
-            Expects `function` to be of type `Callable[[Any], Any]`.
-            Applies a Python function to each individual value in the column.
-        * GroupBy
-            Expects `function` to be of type `Callable[[Series], Any]`.
-            For each group, applies a Python function to the slice of the column
-            corresponding to that group.
-
         Parameters
         ----------
         function
@@ -4589,9 +4559,9 @@ class Expr:
         pass_name
             Pass the Series name to the custom function (this is more expensive).
         returns_scalar
-            If the function passed does a reduction
-            (e.g. sum, min, etc), Polars must be informed of this otherwise
-            the schema might be incorrect.
+
+            .. deprecated:: 1.32.0
+                Is ignored and will be removed in 2.0.
         strategy : {'thread_local', 'threading'}
             The threading strategy to use.
 
@@ -4658,28 +4628,14 @@ class Expr:
         ...     (pl.col("a") * 2).alias("a_times_2"),
         ... )  # doctest: +IGNORE_RESULT
 
-        In a GroupBy context, each element of the column is itself a Series:
-
-        >>> (
-        ...     df.lazy().group_by("b").agg(pl.col("a")).collect()
-        ... )  # doctest: +IGNORE_RESULT
-        shape: (3, 2)
-        ┌─────┬───────────┐
-        │ b   ┆ a         │
-        │ --- ┆ ---       │
-        │ str ┆ list[i64] │
-        ╞═════╪═══════════╡
-        │ a   ┆ [1]       │
-        │ b   ┆ [2]       │
-        │ c   ┆ [3, 1]    │
-        └─────┴───────────┘
-
-        Therefore, from the user's point-of-view, the function is applied per-group:
-
         >>> (
         ...     df.lazy()
         ...     .group_by("b")
-        ...     .agg(pl.col("a").map_elements(lambda x: x.sum(), return_dtype=pl.Int64))
+        ...     .agg(
+        ...         pl.col("a")
+        ...         .implode()
+        ...         .map_elements(lambda x: x.sum(), return_dtype=pl.Int64)
+        ...     )
         ...     .collect()
         ... )  # doctest: +IGNORE_RESULT
         shape: (3, 2)
@@ -4713,7 +4669,9 @@ class Expr:
         ... )
         >>> df.with_columns(
         ...     scaled=pl.col("val")
+        ...     .implode()
         ...     .map_elements(lambda s: s * len(s), return_dtype=pl.List(pl.Int64))
+        ...     .explode()
         ...     .over("key"),
         ... ).sort("key")
         shape: (6, 3)
@@ -4735,6 +4693,7 @@ class Expr:
         >>> df.with_columns(
         ...     scaled=(pl.col("val") * pl.col("val").count()).over("key"),
         ... ).sort("key")  # doctest: +IGNORE_RESULT
+
         """
         if strategy == "threading":
             issue_unstable_warning(
@@ -4747,6 +4706,10 @@ class Expr:
         root_names = self.meta.root_names()
         if len(root_names) > 0:
             warn_on_inefficient_map(function, columns=root_names, map_target="expr")
+
+        if isinstance(return_dtype, pl.DataTypeExpr):
+            msg = "DataTypeExpr is not supported for map_elements"
+            raise TypeError(msg)
 
         if pass_name:
 
@@ -4774,9 +4737,10 @@ class Expr:
         if strategy == "thread_local":
             return self.map_batches(
                 wrap_f,
-                agg_list=True,
+                agg_list=False,
                 return_dtype=return_dtype,
-                returns_scalar=returns_scalar,
+                returns_scalar=False,
+                is_elementwise=True,
             )
         elif strategy == "threading":
 
@@ -4785,9 +4749,9 @@ class Expr:
                     return df.lazy().select(
                         F.col("x").map_batches(
                             wrap_f,
-                            agg_list=True,
+                            agg_list=False,
                             return_dtype=return_dtype,
-                            returns_scalar=returns_scalar,
+                            returns_scalar=False,
                         )
                     )
 
@@ -4822,9 +4786,10 @@ class Expr:
 
             return self.map_batches(
                 wrap_threading,
-                agg_list=True,
+                agg_list=False,
                 return_dtype=return_dtype,
-                returns_scalar=returns_scalar,
+                returns_scalar=False,
+                is_elementwise=True,
             )
         else:
             msg = f"strategy {strategy!r} is not supported"
@@ -5014,8 +4979,10 @@ class Expr:
         """
         # This cast enables tail with expressions that return unsigned integers,
         # for which negate otherwise raises InvalidOperationError.
-        offset = -self._from_pyexpr(
-            parse_into_expression(n).cast(Int64, strict=False, wrap_numerical=True)
+        offset = -(
+            self._from_pyexpr(parse_into_expression(n)).cast(
+                Int64, strict=False, wrap_numerical=True
+            )
         )
         return self.slice(offset, n)
 
@@ -6017,6 +5984,64 @@ class Expr:
             self._pyexpr.is_between(lower_bound, upper_bound, closed)
         )
 
+    def is_close(
+        self,
+        other: IntoExpr,
+        *,
+        abs_tol: float = 0.0,
+        rel_tol: float = 1e-09,
+        nans_equal: bool = False,
+    ) -> Expr:
+        r"""
+        Check if this expression is close, i.e. almost equal, to the other expression.
+
+        Two values `a` and `b` are considered close if the following condition holds:
+
+        .. math::
+            |a-b| \le max \{ \text{rel_tol} \cdot max \{ |a|, |b| \}, \text{abs_tol} \}
+
+        Parameters
+        ----------
+        abs_tol
+            Absolute tolerance. This is the maximum allowed absolute difference between
+            two values. Must be non-negative.
+        rel_tol
+            Relative tolerance. This is the maximum allowed difference between two
+            values, relative to the larger absolute value. Must be in the range [0, 1).
+        nans_equal
+            Whether NaN values should be considered equal.
+
+        Returns
+        -------
+        Expr
+            Expression of data type :class:`Boolean`.
+
+        Notes
+        -----
+            The implementation of this method is symmetric and mirrors the behavior of
+            :meth:`math.isclose`. Specifically note that this behavior is different to
+            :meth:`numpy.isclose`.
+
+        Examples
+        --------
+        >>> df = pl.DataFrame({"a": [1.5, 2.0, 2.5], "b": [1.55, 2.2, 3.0]})
+        >>> df.with_columns(pl.col("a").is_close("b", abs_tol=0.1).alias("is_close"))
+        shape: (3, 3)
+        ┌─────┬──────┬──────────┐
+        │ a   ┆ b    ┆ is_close │
+        │ --- ┆ ---  ┆ ---      │
+        │ f64 ┆ f64  ┆ bool     │
+        ╞═════╪══════╪══════════╡
+        │ 1.5 ┆ 1.55 ┆ true     │
+        │ 2.0 ┆ 2.2  ┆ false    │
+        │ 2.5 ┆ 3.0  ┆ false    │
+        └─────┴──────┴──────────┘
+        """
+        other = parse_into_expression(other)
+        return self._from_pyexpr(
+            self._pyexpr.is_close(other, abs_tol, rel_tol, nans_equal)
+        )
+
     def hash(
         self,
         seed: int = 0,
@@ -6138,7 +6163,7 @@ class Expr:
             print(fmt.format(s))
             return s
 
-        return self.map_batches(inspect, return_dtype=None, agg_list=True)
+        return self.map_batches(inspect, return_dtype=F.dtype_of(self))
 
     def interpolate(self, method: InterpolationMethod = "linear") -> Expr:
         """
@@ -10578,7 +10603,7 @@ class Expr:
         new: IntoExpr | Sequence[Any] | NoDefault = no_default,
         *,
         default: IntoExpr | NoDefault = no_default,
-        return_dtype: PolarsDataType | None = None,
+        return_dtype: PolarsDataType | pl.DataTypeExpr | None = None,
     ) -> Expr:
         """
         Replace all values by different values.
@@ -10590,7 +10615,7 @@ class Expr:
             Accepts expression input. Sequences are parsed as Series,
             other non-expression inputs are parsed as literals.
             Also accepts a mapping of values to their replacement as syntactic sugar for
-            `replace_all(old=Series(mapping.keys()), new=Series(mapping.values()))`.
+            `replace_strict(old=Series(mapping.keys()), new=Series(mapping.values()))`.
         new
             Value or sequence of values to replace by.
             Accepts expression input. Sequences are parsed as Series,
@@ -10756,15 +10781,17 @@ class Expr:
         old = parse_into_expression(old, str_as_lit=True)  # type: ignore[arg-type]
         new = parse_into_expression(new, str_as_lit=True)  # type: ignore[arg-type]
 
+        dtype: pl.DataTypeExpr | None = None
+        if return_dtype is not None:
+            dtype = parse_into_datatype_expr(return_dtype)._pydatatype_expr
+
         default = (
             None
             if default is no_default
             else parse_into_expression(default, str_as_lit=True)
         )
 
-        return self._from_pyexpr(
-            self._pyexpr.replace_strict(old, new, default, return_dtype)
-        )
+        return self._from_pyexpr(self._pyexpr.replace_strict(old, new, default, dtype))
 
     def bitwise_count_ones(self) -> Expr:
         """Evaluate the number of set bits."""

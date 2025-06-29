@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from polars._utils.deprecation import deprecate_nonkeyword_arguments, deprecated
 from polars._utils.unstable import unstable
 from polars._utils.various import no_default
+from polars.datatypes import Int64
 from polars.datatypes.constants import N_INFER_DEFAULT
 from polars.series.utils import expr_dispatch
 
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
         IntoExpr,
         IntoExprColumn,
         PolarsDataType,
+        PolarsIntegerType,
         PolarsTemporalType,
         TimeUnit,
         TransferEncoding,
@@ -1448,15 +1450,15 @@ class StringNameSpace:
         ]
         """
 
-    def pad_start(self, length: int, fill_char: str = " ") -> Series:
+    def pad_start(self, length: int | IntoExprColumn, fill_char: str = " ") -> Series:
         """
         Pad the start of the string until it reaches the given length.
 
         Parameters
         ----------
         length
-            Pad the string until it reaches this length. Strings with length equal to
-            or greater than this value are returned as-is.
+            Pad the string until it reaches this length. Strings with length equal to or
+            greater than this value are returned as-is.
         fill_char
             The character to pad the string with.
 
@@ -1479,15 +1481,15 @@ class StringNameSpace:
         ]
         """
 
-    def pad_end(self, length: int, fill_char: str = " ") -> Series:
+    def pad_end(self, length: int | IntoExprColumn, fill_char: str = " ") -> Series:
         """
         Pad the end of the string until it reaches the given length.
 
         Parameters
         ----------
         length
-            Pad the string until it reaches this length. Strings with length equal to
-            or greater than this value are returned as-is.
+            Pad the string until it reaches this length. Strings with length equal to or
+            greater than this value are returned as-is.
         fill_char
             The character to pad the string with.
 
@@ -1513,14 +1515,14 @@ class StringNameSpace:
         """
         Pad the start of the string with zeros until it reaches the given length.
 
-        A sign prefix (`-`) is handled by inserting the padding after the sign
-        character rather than before.
+        A sign prefix (`-`) is handled by inserting the padding after the sign character
+        rather than before.
 
         Parameters
         ----------
         length
-            Pad the string until it reaches this length. Strings with length equal to
-            or greater than this value are returned as-is.
+            Pad the string until it reaches this length. Strings with length equal to or
+            greater than this value are returned as-is.
 
         See Also
         --------
@@ -1836,10 +1838,14 @@ class StringNameSpace:
         """
 
     def to_integer(
-        self, *, base: int | IntoExprColumn = 10, strict: bool = True
+        self,
+        *,
+        base: int | IntoExprColumn = 10,
+        dtype: PolarsIntegerType = Int64,
+        strict: bool = True,
     ) -> Series:
         """
-        Convert an String column into an Int64 column with base radix.
+        Convert an String column into a column of dtype with base radix.
 
         Parameters
         ----------
@@ -1847,6 +1853,9 @@ class StringNameSpace:
             Positive integer or expression which is the base of the string
             we are parsing.
             Default: 10.
+        dtype
+            Polars integer type to cast to.
+            Default: :class:`Int64`.
         strict
             Bool, Default=True will raise any ParseError or overflow as ComputeError.
             False silently convert to Null.
@@ -1854,14 +1863,14 @@ class StringNameSpace:
         Returns
         -------
         Series
-            Series of data type :class:`Int64`.
+            Series of data.
 
         Examples
         --------
         >>> s = pl.Series("bin", ["110", "101", "010", "invalid"])
-        >>> s.str.to_integer(base=2, strict=False)
+        >>> s.str.to_integer(base=2, dtype=pl.Int32, strict=False)
         shape: (4,)
-        Series: 'bin' [i64]
+        Series: 'bin' [i32]
         [
                 6
                 5

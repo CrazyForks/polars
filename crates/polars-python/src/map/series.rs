@@ -505,7 +505,6 @@ impl<'py, T> ApplyLambda<'py> for ChunkedArray<T>
 where
     T: PyPolarsNumericType,
     T::Native: IntoPyObject<'py> + FromPyObject<'py>,
-    ChunkedArray<T>: IntoSeries,
 {
     fn apply_lambda_unknown(
         &self,
@@ -1801,7 +1800,7 @@ impl<'py> ApplyLambda<'py> for ObjectChunked<ObjectValue> {
     }
 }
 
-fn iter_struct(ca: &StructChunked) -> impl Iterator<Item = AnyValue> {
+fn iter_struct(ca: &StructChunked) -> impl Iterator<Item = AnyValue<'_>> {
     (0..ca.len()).map(|i| unsafe { ca.get_any_value_unchecked(i) })
 }
 

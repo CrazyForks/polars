@@ -117,8 +117,10 @@ bitflags!(
             ///
             /// mutually exclusive with `RETURNS_SCALAR`
             const LENGTH_PRESERVING = 1 << 9;
-            /// Aggregate the values of the expression into a list before applying the function.
-            const APPLY_LIST = 1 << 10;
+            /// NULLs on the first input are propagated to the output.
+            const PRESERVES_NULL_FIRST_INPUT = 1 << 10;
+            /// NULLs on any input are propagated to the output.
+            const PRESERVES_NULL_ALL_INPUTS = 1 << 11;
         }
 );
 
@@ -166,9 +168,6 @@ pub struct FunctionOptions {
     pub check_lengths: UnsafeBool,
     pub flags: FunctionFlags,
 
-    // used for formatting, (only for anonymous functions)
-    #[cfg_attr(any(feature = "serde", feature = "dsl-schema"), serde(skip))]
-    pub fmt_str: &'static str,
     /// Options used when deciding how to cast the arguments of the function.
     #[cfg_attr(any(feature = "serde", feature = "dsl-schema"), serde(skip))]
     pub cast_options: Option<CastingRules>,
@@ -249,18 +248,12 @@ impl FunctionOptions {
         self.flags = f(self.flags);
         self
     }
-
-    pub fn with_fmt_str(mut self, fmt_str: &'static str) -> FunctionOptions {
-        self.fmt_str = fmt_str;
-        self
-    }
 }
 
 impl Default for FunctionOptions {
     fn default() -> Self {
         FunctionOptions {
             check_lengths: UnsafeBool(true),
-            fmt_str: Default::default(),
             cast_options: Default::default(),
             flags: Default::default(),
         }

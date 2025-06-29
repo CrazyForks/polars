@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 
 use arrow::bitmap::bitmask::BitMask;
@@ -11,7 +10,9 @@ use polars_error::{PolarsResult, feature_gated};
 use polars_io::cloud::CloudOptions;
 use polars_plan::dsl::deletion::DeletionFilesList;
 use polars_plan::dsl::{CastColumnsPolicy, ScanSource};
+use polars_utils::format_pl_smallstr;
 use polars_utils::pl_str::PlSmallStr;
+use polars_utils::plpath::PlPath;
 use polars_utils::slice_enum::Slice;
 
 use crate::async_executor::{self, AbortOnDropHandle, TaskPriority};
@@ -99,7 +100,7 @@ impl DeletionFilesProvider {
                     .iter()
                     .enumerate()
                     .map(|(deletion_file_idx, path)| {
-                        let source = ScanSource::Path(Arc::from(Path::new(path)));
+                        let source = ScanSource::Path(PlPath::new(path));
                         let mut reader = reader_builder.build_file_reader(
                             source.clone(),
                             cloud_options.clone(),
@@ -270,6 +271,26 @@ pub enum ExternalFilterMask {
 }
 
 impl ExternalFilterMask {
+    pub fn variant_name(&self) -> &'static str {
+        use ExternalFilterMask::*;
+        match self {
+            IcebergPositionDelete { .. } => "IcebergPositionDelete",
+        }
+    }
+
+    /// Human-friendly verbose log display.
+    pub fn log_display(this: Option<&Self>) -> PlSmallStr {
+        match this {
+            None => PlSmallStr::from_static("None"),
+            Some(mask) => {
+                let mask_variant = mask.variant_name();
+                let n = mask.num_deleted_rows();
+                let s = if n == 1 { "" } else { "s" };
+                format_pl_smallstr!("{mask_variant}(<{n} deletion{s}>)")
+            },
+        }
+    }
+
     pub fn filter_df(&self, df: &mut DataFrame) -> PolarsResult<()> {
         match self {
             Self::IcebergPositionDelete { mask } => {
@@ -292,6 +313,8 @@ impl ExternalFilterMask {
     pub fn slice(&self, offset: usize, len: usize) -> Self {
         match self {
             Self::IcebergPositionDelete { mask } => {
+                // This is not a valid offset, it's also a sentinel value from `RowCounter::MAX`.
+                assert_ne!(offset, usize::MAX);
                 let offset = offset.min(mask.len());
                 let len = len.min(mask.len() - offset);
 
@@ -323,7 +346,7 @@ impl ExternalFilterMask {
     ///
     /// # Panics
     /// Panics if `slice` is negative.
-    pub fn calc_physical_pre_slice(&self, slice: Slice) -> Slice {
+    pub fn calc_physical_slice(&self, slice: Slice) -> Slice {
         let mask = self.get_mask();
 
         let phys_slice = match slice {
@@ -397,7 +420,7 @@ mod tests {
             mask: mask.into_iter().collect(),
         };
 
-        let slice = mask.calc_physical_pre_slice(slice);
+        let slice = mask.calc_physical_slice(slice);
 
         let mask = {
             let Slice::Positive { offset, len } =

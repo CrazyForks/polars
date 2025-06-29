@@ -181,7 +181,7 @@ impl Column {
     }
 
     #[inline]
-    pub fn field(&self) -> Cow<Field> {
+    pub fn field(&self) -> Cow<'_, Field> {
         match self {
             Column::Series(s) => s.field(),
             Column::Partitioned(s) => s.field(),
@@ -1420,7 +1420,7 @@ impl Column {
     }
 
     #[inline]
-    pub fn get(&self, index: usize) -> PolarsResult<AnyValue> {
+    pub fn get(&self, index: usize) -> PolarsResult<AnyValue<'_>> {
         polars_ensure!(index < self.len(), oob = index, self.len());
 
         // SAFETY: Bounds check done just before.
@@ -1430,7 +1430,7 @@ impl Column {
     ///
     /// Does not perform bounds check on `index`
     #[inline(always)]
-    pub unsafe fn get_unchecked(&self, index: usize) -> AnyValue {
+    pub unsafe fn get_unchecked(&self, index: usize) -> AnyValue<'_> {
         debug_assert!(index < self.len());
 
         match self {
@@ -1483,7 +1483,7 @@ impl Column {
         }
     }
 
-    pub(crate) fn str_value(&self, index: usize) -> PolarsResult<Cow<str>> {
+    pub(crate) fn str_value(&self, index: usize) -> PolarsResult<Cow<'_, str>> {
         Ok(self.get(index)?.str_value())
     }
 
@@ -1537,8 +1537,9 @@ impl Column {
             Column::Partitioned(s) => s.as_materialized_series().std_reduce(ddof),
             Column::Scalar(s) => {
                 // We don't really want to deal with handling the full semantics here so we just
-                // cast to a single value series. This is a tiny bit wasteful, but probably fine.
-                s.as_single_value_series().std_reduce(ddof)
+                // cast to a small series. This is a tiny bit wasteful, but probably fine.
+                let n = s.len().min(ddof as usize + 1);
+                s.as_n_values_series(n).std_reduce(ddof)
             },
         }
     }
@@ -1548,8 +1549,9 @@ impl Column {
             Column::Partitioned(s) => s.as_materialized_series().var_reduce(ddof),
             Column::Scalar(s) => {
                 // We don't really want to deal with handling the full semantics here so we just
-                // cast to a single value series. This is a tiny bit wasteful, but probably fine.
-                s.as_single_value_series().var_reduce(ddof)
+                // cast to a small series. This is a tiny bit wasteful, but probably fine.
+                let n = s.len().min(ddof as usize + 1);
+                s.as_n_values_series(n).var_reduce(ddof)
             },
         }
     }

@@ -1,11 +1,10 @@
-use std::path::Path;
-
 use memchr::memchr2_iter;
 use num_traits::Pow;
 use polars_core::prelude::*;
 use polars_core::{POOL, config};
 use polars_error::feature_gated;
 use polars_utils::mmap::MMapSemaphore;
+use polars_utils::plpath::PlPathRef;
 use polars_utils::select::select_unpredictable;
 use rayon::prelude::*;
 
@@ -14,7 +13,6 @@ use super::buffer::Buffer;
 use super::options::{CommentPrefix, NullValuesCompiled};
 use super::splitfields::SplitFields;
 use super::utils::get_file_chunks;
-use crate::path_utils::is_cloud_url;
 use crate::prelude::_csv_read_internal::find_starting_point;
 use crate::utils::compression::maybe_decompress_bytes;
 
@@ -22,7 +20,7 @@ use crate::utils::compression::maybe_decompress_bytes;
 /// useful for count(*) queries
 #[allow(clippy::too_many_arguments)]
 pub fn count_rows(
-    path: &Path,
+    addr: PlPathRef<'_>,
     separator: u8,
     quote_char: Option<u8>,
     comment_prefix: Option<&CommentPrefix>,
@@ -32,16 +30,18 @@ pub fn count_rows(
     skip_rows_before_header: usize,
     skip_rows_after_header: usize,
 ) -> PolarsResult<usize> {
-    let file = if is_cloud_url(path) || config::force_async() {
-        feature_gated!("cloud", {
+    let file = match addr
+        .as_local_path()
+        .and_then(|v| (!config::force_async()).then_some(v))
+    {
+        None => feature_gated!("cloud", {
             crate::file_cache::FILE_CACHE
-                .get_entry(path.to_str().unwrap())
+                .get_entry(addr)
                 // Safety: This was initialized by schema inference.
                 .unwrap()
                 .try_open_assume_latest()?
-        })
-    } else {
-        polars_utils::open_file(path)?
+        }),
+        Some(path) => polars_utils::open_file(path)?,
     };
 
     let mmap = MMapSemaphore::new_from_file(&file).unwrap();
@@ -945,6 +945,8 @@ pub(super) fn skip_this_line_naive(input: &[u8], eol_char: u8) -> &[u8] {
 /// * `projection` - Indices of the columns to project.
 /// * `buffers` - Parsed output will be written to these buffers. Except for UTF8 data. The offsets of the
 ///   fields are written to the buffers. The UTF8 data will be parsed later.
+///
+/// Returns the number of bytes parsed successfully.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn parse_lines(
     mut bytes: &[u8],

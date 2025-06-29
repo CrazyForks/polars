@@ -9,7 +9,6 @@ use recursive::recursive;
 use utils::*;
 
 use super::*;
-use crate::dsl::function_expr::FunctionExpr;
 use crate::prelude::optimizer::predicate_pushdown::group_by::process_group_by;
 use crate::prelude::optimizer::predicate_pushdown::join::process_join;
 use crate::utils::{check_input_node, has_aexpr};
@@ -369,9 +368,9 @@ impl PredicatePushDown<'_> {
 
                 match &*scan_type {
                     #[cfg(feature = "parquet")]
-                    FileScan::Parquet { .. } => {},
+                    FileScanIR::Parquet { .. } => {},
                     #[cfg(feature = "ipc")]
-                    FileScan::Ipc { .. } => {},
+                    FileScanIR::Ipc { .. } => {},
                     _ => {
                         // Disallow row index pushdown of other scans as they may
                         // not update the row index properly before applying the
@@ -393,10 +392,10 @@ impl PredicatePushDown<'_> {
 
                 let mut do_optimization = match &*scan_type {
                     #[cfg(feature = "csv")]
-                    FileScan::Csv { .. } => unified_scan_args.pre_slice.is_none(),
-                    FileScan::Anonymous { function, .. } => function.allows_predicate_pushdown(),
+                    FileScanIR::Csv { .. } => unified_scan_args.pre_slice.is_none(),
+                    FileScanIR::Anonymous { function, .. } => function.allows_predicate_pushdown(),
                     #[cfg(feature = "json")]
-                    FileScan::NDJson { .. } => true,
+                    FileScanIR::NDJson { .. } => true,
                     #[allow(unreachable_patterns)]
                     _ => true,
                 };

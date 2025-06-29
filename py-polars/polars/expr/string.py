@@ -11,7 +11,7 @@ from polars._utils.parse import parse_into_expression
 from polars._utils.unstable import unstable
 from polars._utils.various import find_stacklevel, no_default, qualified_type_name
 from polars._utils.wrap import wrap_expr
-from polars.datatypes import Date, Datetime, Time, parse_into_dtype
+from polars.datatypes import Date, Datetime, Int64, Time, parse_into_datatype_expr
 from polars.datatypes.constants import N_INFER_DEFAULT
 from polars.exceptions import ChronoFormatWarning
 
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
         IntoExpr,
         IntoExprColumn,
         PolarsDataType,
+        PolarsIntegerType,
         PolarsTemporalType,
         TimeUnit,
         TransferEncoding,
@@ -820,15 +821,15 @@ class ExprStringNameSpace:
         suffix = parse_into_expression(suffix, str_as_lit=True)
         return wrap_expr(self._pyexpr.str_strip_suffix(suffix))
 
-    def pad_start(self, length: int, fill_char: str = " ") -> Expr:
+    def pad_start(self, length: int | IntoExprColumn, fill_char: str = " ") -> Expr:
         """
         Pad the start of the string until it reaches the given length.
 
         Parameters
         ----------
         length
-            Pad the string until it reaches this length. Strings with length equal to
-            or greater than this value are returned as-is.
+            Pad the string until it reaches this length. Strings with length equal to or
+            greater than this value are returned as-is.
         fill_char
             The character to pad the string with.
 
@@ -853,20 +854,21 @@ class ExprStringNameSpace:
         │ null         ┆ null         │
         └──────────────┴──────────────┘
         """
+        length = parse_into_expression(length)
         if not isinstance(fill_char, str):
             msg = f'"pad_start" expects a `str`, given a {qualified_type_name(fill_char)!r}'
             raise TypeError(msg)
         return wrap_expr(self._pyexpr.str_pad_start(length, fill_char))
 
-    def pad_end(self, length: int, fill_char: str = " ") -> Expr:
+    def pad_end(self, length: int | IntoExprColumn, fill_char: str = " ") -> Expr:
         """
         Pad the end of the string until it reaches the given length.
 
         Parameters
         ----------
         length
-            Pad the string until it reaches this length. Strings with length equal to
-            or greater than this value are returned as-is.
+            Pad the string until it reaches this length. Strings with length equal to or
+            greater than this value are returned as-is. Can be int or expression.
         fill_char
             The character to pad the string with.
 
@@ -890,6 +892,7 @@ class ExprStringNameSpace:
         │ null         ┆ null         │
         └──────────────┴──────────────┘
         """
+        length = parse_into_expression(length)
         if not isinstance(fill_char, str):
             msg = (
                 f'"pad_end" expects a `str`, given a {qualified_type_name(fill_char)!r}'
@@ -934,6 +937,24 @@ class ExprStringNameSpace:
         │ 999999 ┆ 999999 │
         │ null   ┆ null   │
         └────────┴────────┘
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "a": [-1, 123, 999999, None],
+        ...         "length": [8, 4, 1, 2],
+        ...     }
+        ... )
+        >>> df.with_columns(zfill=pl.col("a").cast(pl.String).str.zfill("length"))
+        shape: (4, 3)
+        ┌────────┬────────┬──────────┐
+        │ a      ┆ length ┆ zfill    │
+        │ ---    ┆ ---    ┆ ---      │
+        │ i64    ┆ i64    ┆ str      │
+        ╞════════╪════════╪══════════╡
+        │ -1     ┆ 8      ┆ -0000001 │
+        │ 123    ┆ 4      ┆ 0123     │
+        │ 999999 ┆ 1      ┆ 999999   │
+        │ null   ┆ 2      ┆ null     │
+        └────────┴────────┴──────────┘
         """
         length = parse_into_expression(length)
         return wrap_expr(self._pyexpr.str_zfill(length))
@@ -1229,7 +1250,7 @@ class ExprStringNameSpace:
 
     def json_decode(
         self,
-        dtype: PolarsDataType | None = None,
+        dtype: PolarsDataType | pl.DataTypeExpr | None = None,
         *,
         infer_schema_length: int | None = N_INFER_DEFAULT,
     ) -> Expr:
@@ -1271,7 +1292,7 @@ class ExprStringNameSpace:
         └─────────────────────┴───────────┘
         """
         if dtype is not None:
-            dtype = parse_into_dtype(dtype)
+            dtype = parse_into_datatype_expr(dtype)._pydatatype_expr
         return wrap_expr(self._pyexpr.str_json_decode(dtype, infer_schema_length))
 
     def json_path_match(self, json_path: IntoExprColumn) -> Expr:
@@ -2412,7 +2433,11 @@ class ExprStringNameSpace:
         return F.when(split.ne_missing([])).then(split).otherwise([""]).explode()
 
     def to_integer(
-        self, *, base: int | IntoExprColumn = 10, strict: bool = True
+        self,
+        *,
+        base: int | IntoExprColumn = 10,
+        dtype: PolarsIntegerType = Int64,
+        strict: bool = True,
     ) -> Expr:
         """
         Convert a String column into an Int64 column with base radix.
@@ -2435,12 +2460,16 @@ class ExprStringNameSpace:
         Examples
         --------
         >>> df = pl.DataFrame({"bin": ["110", "101", "010", "invalid"]})
-        >>> df.with_columns(parsed=pl.col("bin").str.to_integer(base=2, strict=False))
+        >>> df.with_columns(
+        ...     parsed=pl.col("bin").str.to_integer(
+        ...         base=2, dtype=pl.Int32, strict=False
+        ...     )
+        ... )
         shape: (4, 2)
         ┌─────────┬────────┐
         │ bin     ┆ parsed │
         │ ---     ┆ ---    │
-        │ str     ┆ i64    │
+        │ str     ┆ i32    │
         ╞═════════╪════════╡
         │ 110     ┆ 6      │
         │ 101     ┆ 5      │
@@ -2463,7 +2492,7 @@ class ExprStringNameSpace:
         └──────┴────────┘
         """
         base = parse_into_expression(base, str_as_lit=False)
-        return wrap_expr(self._pyexpr.str_to_integer(base, strict))
+        return wrap_expr(self._pyexpr.str_to_integer(base, dtype, strict))
 
     def contains_any(
         self, patterns: IntoExpr, *, ascii_case_insensitive: bool = False

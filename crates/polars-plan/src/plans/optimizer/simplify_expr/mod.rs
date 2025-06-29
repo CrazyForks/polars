@@ -3,13 +3,14 @@ mod simplify_functions;
 use polars_utils::floor_divmod::FloorDivMod;
 use polars_utils::total_ord::ToTotalOrd;
 use simplify_functions::optimize_functions;
+mod arity;
 
 use crate::plans::*;
 
 fn new_null_count(input: &[ExprIR]) -> AExpr {
     AExpr::Function {
         input: input.to_vec(),
-        function: FunctionExpr::NullCount,
+        function: IRFunctionExpr::NullCount,
         options: FunctionOptions::aggregation()
             .with_flags(|f| f | FunctionFlags::ALLOW_GROUP_AWARE),
     }
@@ -140,128 +141,24 @@ impl OptimizationRule for SimplifyBooleanRule {
         ctx: OptimizeExprContext,
     ) -> PolarsResult<Option<AExpr>> {
         let expr = expr_arena.get(expr_node);
-        let in_filter = ctx.in_filter;
 
         let out = match expr {
             // true AND x => x
-            AExpr::BinaryExpr {
-                left,
-                op: Operator::And,
-                right,
-            } if matches!(
-                expr_arena.get(*left),
-                AExpr::Literal(lv) if lv.bool() == Some(true)
-            ) && in_filter =>
-            {
-                // Only in filter as we might change the name from "literal"
-                // to whatever lhs columns is.
-                return Ok(Some(expr_arena.get(*right).clone()));
+            AExpr::BinaryExpr { left, op, right } => {
+                return Ok(arity::simplify_binary(*left, *op, *right, ctx, expr_arena));
             },
-            // x AND true => x
-            AExpr::BinaryExpr {
-                left,
-                op: Operator::And,
-                right,
-            } if matches!(
-                expr_arena.get(*right),
-                AExpr::Literal(lv) if lv.bool() == Some(true)
-            ) =>
-            {
-                Some(expr_arena.get(*left).clone())
-            },
-
-            // x AND false -> false
-            // FIXME: we need an optimizer redesign to allow x & false to be optimized
-            // in general as we can forget the length of a series otherwise.
-            AExpr::BinaryExpr {
-                left,
-                op: Operator::And,
-                right,
-            } if matches!(expr_arena.get(*left), AExpr::Literal(_))
-                && matches!(
-                    expr_arena.get(*right),
-                    AExpr::Literal(lv) if lv.bool() == Some(false)
-                ) =>
-            {
-                Some(AExpr::Literal(Scalar::from(false).into()))
-            },
-
-            // false AND x -> false
-            // FIXME: we need an optimizer redesign to allow false & x to be optimized
-            // in general as we can forget the length of a series otherwise.
-            AExpr::BinaryExpr {
-                left,
-                op: Operator::And,
-                right,
-            } if matches!(
-                expr_arena.get(*left),
-                AExpr::Literal(lv) if lv.bool() == Some(false)
-            ) && matches!(expr_arena.get(*right), AExpr::Literal(_)) =>
-            {
-                Some(AExpr::Literal(Scalar::from(false).into()))
-            },
-
-            // false or x => x
-            AExpr::BinaryExpr {
-                left,
-                op: Operator::Or,
-                right,
-            } if matches!(
-                expr_arena.get(*left),
-                AExpr::Literal(lv) if lv.bool() == Some(false)
-            ) && in_filter =>
-            {
-                // Only in filter as we might change the name from "literal"
-                // to whatever lhs columns is.
-                return Ok(Some(expr_arena.get(*right).clone()));
-            },
-            // x or false => x
-            AExpr::BinaryExpr {
-                left,
-                op: Operator::Or,
-                right,
-                ..
-            } if matches!(
-                expr_arena.get(*right),
-                AExpr::Literal(lv) if lv.bool() == Some(false)
-            ) =>
-            {
-                Some(expr_arena.get(*left).clone())
-            },
-
-            // true OR x => true
-            // FIXME: we need an optimizer redesign to allow true | x to be optimized
-            // in general as we can forget the length of a series otherwise.
-            AExpr::BinaryExpr {
-                left,
-                op: Operator::Or,
-                right,
-            } if matches!(expr_arena.get(*left), AExpr::Literal(_))
-                && matches!(
-                    expr_arena.get(*right),
-                    AExpr::Literal(lv) if lv.bool() == Some(true)
-                ) =>
-            {
-                Some(AExpr::Literal(Scalar::from(true).into()))
-            },
-
-            // x OR true => true
-            // FIXME: we need an optimizer redesign to allow true | x to be optimized
-            // in general as we can forget the length of a series otherwise.
-            AExpr::BinaryExpr {
-                left,
-                op: Operator::Or,
-                right,
-            } if matches!(
-                expr_arena.get(*left),
-                    AExpr::Literal(lv) if lv.bool() == Some(true)
-            ) && matches!(expr_arena.get(*right), AExpr::Literal(_)) =>
-            {
-                Some(AExpr::Literal(Scalar::from(true).into()))
+            AExpr::Ternary {
+                predicate,
+                truthy,
+                falsy,
+            } => {
+                return Ok(arity::simplify_ternary(
+                    *predicate, *truthy, *falsy, expr_arena,
+                ));
             },
             AExpr::Function {
                 input,
-                function: FunctionExpr::Negate,
+                function: IRFunctionExpr::Negate,
                 ..
             } if input.len() == 1 => {
                 let input = &input[0];
@@ -341,7 +238,7 @@ fn string_addition_to_linear_concat(
                     AExpr::Function {
                         input: input_left,
                         function:
-                            fun_l @ FunctionExpr::StringExpr(StringFunction::ConcatHorizontal {
+                            fun_l @ IRFunctionExpr::StringExpr(IRStringFunction::ConcatHorizontal {
                                 delimiter: sep_l,
                                 ignore_nulls: ignore_nulls_l,
                             }),
@@ -350,7 +247,7 @@ fn string_addition_to_linear_concat(
                     AExpr::Function {
                         input: input_right,
                         function:
-                            FunctionExpr::StringExpr(StringFunction::ConcatHorizontal {
+                            IRFunctionExpr::StringExpr(IRStringFunction::ConcatHorizontal {
                                 delimiter: sep_r,
                                 ignore_nulls: ignore_nulls_r,
                             }),
@@ -375,7 +272,7 @@ fn string_addition_to_linear_concat(
                     AExpr::Function {
                         input,
                         function:
-                            fun @ FunctionExpr::StringExpr(StringFunction::ConcatHorizontal {
+                            fun @ IRFunctionExpr::StringExpr(IRStringFunction::ConcatHorizontal {
                                 delimiter: sep,
                                 ignore_nulls,
                             }),
@@ -401,7 +298,7 @@ fn string_addition_to_linear_concat(
                     AExpr::Function {
                         input: input_right,
                         function:
-                            fun @ FunctionExpr::StringExpr(StringFunction::ConcatHorizontal {
+                            fun @ IRFunctionExpr::StringExpr(IRStringFunction::ConcatHorizontal {
                                 delimiter: sep,
                                 ignore_nulls,
                             }),
@@ -422,7 +319,7 @@ fn string_addition_to_linear_concat(
                     }
                 },
                 _ => {
-                    let function = StringFunction::ConcatHorizontal {
+                    let function = IRStringFunction::ConcatHorizontal {
                         delimiter: "".into(),
                         ignore_nulls: false,
                     };
@@ -461,7 +358,7 @@ impl OptimizationRule for SimplifyExprRule {
                 match input_expr {
                     AExpr::Function {
                         input,
-                        function: FunctionExpr::DropNulls,
+                        function: IRFunctionExpr::DropNulls,
                         options: _,
                     } => {
                         // we should perform optimization only if the original expression is a column
@@ -493,12 +390,12 @@ impl OptimizationRule for SimplifyExprRule {
                 match input_expr {
                     AExpr::Function {
                         input,
-                        function: FunctionExpr::Boolean(BooleanFunction::IsNull),
+                        function: IRFunctionExpr::Boolean(IRBooleanFunction::IsNull),
                         options: _,
                     } => Some(new_null_count(input)),
                     AExpr::Function {
                         input,
-                        function: FunctionExpr::Boolean(BooleanFunction::IsNotNull),
+                        function: IRFunctionExpr::Boolean(IRBooleanFunction::IsNotNull),
                         options: _,
                     } => {
                         // we should perform optimization only if the original expression is a column

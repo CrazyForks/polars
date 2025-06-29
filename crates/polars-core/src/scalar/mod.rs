@@ -5,6 +5,7 @@ pub mod reduce;
 use std::hash::Hash;
 
 use polars_error::PolarsResult;
+use polars_utils::IdxSize;
 use polars_utils::pl_str::PlSmallStr;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -47,6 +48,10 @@ impl Scalar {
         Self::new(dtype, AnyValue::Null)
     }
 
+    pub fn new_idxsize(value: IdxSize) -> Self {
+        value.into()
+    }
+
     pub fn cast_with_options(self, dtype: &DataType, options: CastOptions) -> PolarsResult<Self> {
         if self.dtype() == dtype {
             return Ok(self);
@@ -81,7 +86,7 @@ impl Scalar {
         &self.value
     }
 
-    pub fn as_any_value(&self) -> AnyValue {
+    pub fn as_any_value(&self) -> AnyValue<'_> {
         self.value
             .strict_cast(&self.dtype)
             .unwrap_or_else(|| self.value.clone())
@@ -109,6 +114,17 @@ impl Scalar {
     #[inline(always)]
     pub fn with_value(mut self, value: AnyValue<'static>) -> Self {
         self.update(value);
+        self
+    }
+
+    #[inline(always)]
+    pub fn any_value_mut(&mut self) -> &mut AnyValue<'static> {
+        &mut self.value
+    }
+
+    pub fn to_physical(mut self) -> Scalar {
+        self.dtype = self.dtype.to_physical();
+        self.value = self.value.to_physical();
         self
     }
 }

@@ -52,7 +52,7 @@ version_check = { workspace = true }
 [features]
 # debugging utility
 debugging = []
-python = ["dep:pyo3", "polars-utils/python", "polars-ffi", "polars-core/object"]
+python = ["dep:pyo3", "polars-utils/python", "polars-ffi", "polars-core/object", "serde"]
 serde = [
   "dep:serde",
   "polars-core/serde-lazy",
@@ -64,7 +64,6 @@ serde = [
   "polars-compute/serde",
   "either/serde",
 ]
-streaming = []
 parquet = ["polars-io/parquet", "polars-parquet"]
 async = ["polars-io/async", "futures"]
 cloud = ["async", "polars-io/cloud"]
@@ -135,6 +134,7 @@ is_first_distinct = ["polars-core/is_first_distinct", "polars-ops/is_first_disti
 is_last_distinct = ["polars-core/is_last_distinct", "polars-ops/is_last_distinct"]
 is_unique = ["polars-ops/is_unique"]
 is_between = ["polars-ops/is_between"]
+is_close = ["polars-ops/is_close"]
 cross_join = ["polars-ops/cross_join"]
 asof_join = ["polars-time", "polars-ops/asof_join"]
 iejoin = ["polars-ops/iejoin"]
@@ -309,7 +309,6 @@ features = [
   "coalesce",
   "dot_diagram",
   "trigonometry",
-  "streaming",
   "true_div",
   "sign",
 ]

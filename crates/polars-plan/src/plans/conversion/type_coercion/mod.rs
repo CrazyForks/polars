@@ -126,14 +126,12 @@ impl OptimizationRule for TypeCoercionRule {
                         }
                         .should_cast_column("", cast_to, &cast_from);
 
-                        #[expect(clippy::single_match)]
                         match v {
                             // No casting needed
-                            // TODO: Enable after release 1.30.0
-                            // Ok(false) => {
-                            //     return Ok(Some(expr_arena.get(input_expr).clone()));
-                            // },
-                            Ok(true | false) => {
+                            Ok(false) => {
+                                return Ok(Some(expr_arena.get(input_expr).clone()));
+                            },
+                            Ok(true) => {
                                 let options = if cast_from.is_primitive_numeric()
                                     && cast_to.is_primitive_numeric()
                                 {
@@ -221,26 +219,28 @@ impl OptimizationRule for TypeCoercionRule {
             } if {
                 let mut matches = matches!(
                     function,
-                    FunctionExpr::Boolean(BooleanFunction::IsIn { .. })
-                        | FunctionExpr::ListExpr(ListFunction::Contains { .. })
+                    IRFunctionExpr::Boolean(IRBooleanFunction::IsIn { .. })
+                        | IRFunctionExpr::ListExpr(IRListFunction::Contains { .. })
                 );
                 #[cfg(feature = "dtype-array")]
                 {
                     matches |= matches!(
                         function,
-                        FunctionExpr::ArrayExpr(ArrayFunction::Contains { .. })
+                        IRFunctionExpr::ArrayExpr(IRArrayFunction::Contains { .. })
                     );
                 }
                 matches
             } =>
             {
                 let (op, flat, nested, is_contains) = match function {
-                    FunctionExpr::Boolean(BooleanFunction::IsIn { .. }) => ("is_in", 0, 1, false),
-                    FunctionExpr::ListExpr(ListFunction::Contains { .. }) => {
+                    IRFunctionExpr::Boolean(IRBooleanFunction::IsIn { .. }) => {
+                        ("is_in", 0, 1, false)
+                    },
+                    IRFunctionExpr::ListExpr(IRListFunction::Contains { .. }) => {
                         ("list.contains", 1, 0, true)
                     },
                     #[cfg(feature = "dtype-array")]
-                    FunctionExpr::ArrayExpr(ArrayFunction::Contains { .. }) => {
+                    IRFunctionExpr::ArrayExpr(IRArrayFunction::Contains { .. }) => {
                         ("arr.contains", 1, 0, true)
                     },
                     _ => unreachable!(),
@@ -312,7 +312,7 @@ impl OptimizationRule for TypeCoercionRule {
             },
             // shift and fill should only cast left and fill value to super type.
             AExpr::Function {
-                function: FunctionExpr::ShiftAndFill,
+                function: IRFunctionExpr::ShiftAndFill,
                 ref input,
                 options,
             } => {
@@ -353,7 +353,7 @@ impl OptimizationRule for TypeCoercionRule {
                 input[2].set_node(new_node_fill_value);
 
                 Some(AExpr::Function {
-                    function: FunctionExpr::ShiftAndFill,
+                    function: IRFunctionExpr::ShiftAndFill,
                     input,
                     options,
                 })
@@ -460,7 +460,8 @@ impl OptimizationRule for TypeCoercionRule {
             },
             #[cfg(all(feature = "temporal", feature = "dtype-duration"))]
             AExpr::Function {
-                function: ref function @ FunctionExpr::TemporalExpr(TemporalFunction::Duration(_)),
+                function:
+                    ref function @ IRFunctionExpr::TemporalExpr(IRTemporalFunction::Duration(_)),
                 ref input,
                 options,
             } => {
@@ -501,7 +502,7 @@ impl OptimizationRule for TypeCoercionRule {
             },
             #[cfg(feature = "list_gather")]
             AExpr::Function {
-                function: ref function @ FunctionExpr::ListExpr(ListFunction::Gather(_)),
+                function: ref function @ IRFunctionExpr::ListExpr(IRListFunction::Gather(_)),
                 ref input,
                 options,
             } => {
@@ -547,10 +548,10 @@ See https://github.com/pola-rs/polars/issues/22149 for more information."
             #[cfg(all(feature = "strings", feature = "find_many"))]
             AExpr::Function {
                 function:
-                    ref function @ FunctionExpr::StringExpr(
-                        StringFunction::ContainsAny { .. }
-                        | StringFunction::FindMany { .. }
-                        | StringFunction::ExtractMany { .. },
+                    ref function @ IRFunctionExpr::StringExpr(
+                        IRStringFunction::ContainsAny { .. }
+                        | IRStringFunction::FindMany { .. }
+                        | IRStringFunction::ExtractMany { .. },
                     ),
                 ref input,
                 options,
@@ -592,10 +593,46 @@ See https://github.com/pola-rs/polars/issues/22149 for more information."
                 );
                 None
             },
+
+            #[cfg(feature = "string_pad")]
+            AExpr::Function {
+                function:
+                    ref function @ IRFunctionExpr::StringExpr(
+                        IRStringFunction::PadStart { .. }
+                        | IRStringFunction::PadEnd { .. }
+                        | IRStringFunction::ZFill,
+                    ),
+                ref input,
+                options,
+            } => {
+                let (_, length_type) =
+                    unpack!(get_aexpr_and_type(expr_arena, input[1].node(), schema));
+
+                if length_type == DataType::UInt64 {
+                    None
+                } else {
+                    let function = function.clone();
+                    let mut input = input.clone();
+                    cast_expr_ir(
+                        &mut input[1],
+                        &length_type,
+                        &DataType::UInt64,
+                        expr_arena,
+                        CastOptions::Strict,
+                    )?;
+
+                    Some(AExpr::Function {
+                        function,
+                        input,
+                        options,
+                    })
+                }
+            },
+
             #[cfg(all(feature = "strings", feature = "find_many"))]
             AExpr::Function {
                 function:
-                    ref function @ FunctionExpr::StringExpr(StringFunction::ReplaceMany { .. }),
+                    ref function @ IRFunctionExpr::StringExpr(IRStringFunction::ReplaceMany { .. }),
                 ref input,
                 options,
             } => {
@@ -655,7 +692,7 @@ See https://github.com/pola-rs/polars/issues/22149 for more information."
             #[cfg(feature = "replace")]
             AExpr::Function {
                 function:
-                    ref function @ (FunctionExpr::Replace | FunctionExpr::ReplaceStrict { .. }),
+                    ref function @ (IRFunctionExpr::Replace | IRFunctionExpr::ReplaceStrict { .. }),
                 ref input,
                 options,
             } => {
@@ -691,7 +728,8 @@ See https://github.com/pola-rs/polars/issues/22149 for more information."
             #[cfg(feature = "range")]
             AExpr::Function {
                 function:
-                    ref function @ FunctionExpr::Range(RangeFunction::IntRange { step: _, ref dtype }),
+                    ref
+                    function @ IRFunctionExpr::Range(IRRangeFunction::IntRange { step: _, ref dtype }),
                 ref input,
                 options,
             } => {
@@ -730,7 +768,8 @@ See https://github.com/pola-rs/polars/issues/22149 for more information."
             },
             #[cfg(feature = "range")]
             AExpr::Function {
-                function: ref function @ FunctionExpr::Range(RangeFunction::IntRanges),
+                function:
+                    ref function @ IRFunctionExpr::Range(IRRangeFunction::IntRanges { dtype: _ }),
                 ref input,
                 options,
             } => {
@@ -832,7 +871,10 @@ fn try_inline_literal_cast(
             let s = s.cast_with_options(dtype, options)?;
             LiteralValue::Series(SpecialEq::new(s))
         },
-        LiteralValue::Dyn(dyn_value) => dyn_value.clone().try_materialize_to_dtype(dtype)?.into(),
+        LiteralValue::Dyn(dyn_value) => dyn_value
+            .clone()
+            .try_materialize_to_dtype(dtype, options)?
+            .into(),
         lv if lv.is_null() => match dtype {
             DataType::Unknown(UnknownKind::Float | UnknownKind::Int(_) | UnknownKind::Str) => {
                 LiteralValue::untyped_null()
@@ -926,7 +968,7 @@ fn early_escape(type_self: &DataType, type_other: &DataType) -> Option<()> {
 }
 
 fn raise_supertype(
-    function: &FunctionExpr,
+    function: &IRFunctionExpr,
     inputs: &[ExprIR],
     input_schema: &Schema,
     expr_arena: &Arena<AExpr>,

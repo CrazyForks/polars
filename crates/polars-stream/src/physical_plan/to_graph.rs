@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
@@ -20,6 +19,7 @@ use polars_utils::arena::{Arena, Node};
 use polars_utils::format_pl_smallstr;
 use polars_utils::itertools::Itertools;
 use polars_utils::pl_str::PlSmallStr;
+use polars_utils::plpath::PlPath;
 use recursive::recursive;
 use slotmap::{SecondaryMap, SlotMap};
 
@@ -528,6 +528,7 @@ fn to_graph_rec<'a>(
                         pred,
                         ctx.expr_arena,
                         output_schema,
+                        hive_parts.as_ref().map(|hp| hp.df().schema().as_ref()),
                         &mut ctx.expr_conversion_state,
                         true, // create_skip_batch_predicate
                         file_reader_builder
@@ -555,13 +556,6 @@ fn to_graph_rec<'a>(
             let cast_columns_policy = cast_columns_policy.clone();
             let deletion_files = deletion_files.clone();
 
-            if deletion_files.is_some() {
-                polars_bail!(
-                    ComputeError: "not implemented: deletion files {:?}",
-                    deletion_files
-                )
-            }
-
             let verbose = config::verbose();
 
             ctx.graph.add_node(
@@ -581,6 +575,7 @@ fn to_graph_rec<'a>(
                         missing_columns_policy,
                         extra_columns_policy,
                         cast_columns_policy,
+                        deletion_files,
                         // Initialized later
                         num_pipelines: AtomicUsize::new(0),
                         n_readers_pre_init: AtomicUsize::new(0),
@@ -1000,7 +995,9 @@ fn to_graph_rec<'a>(
             }) as Arc<dyn FileReaderBuilder>;
 
             // Give multiscan a single scan source. (It doesn't actually read from this).
-            let sources = ScanSources::Paths(Arc::from([PathBuf::from("python-scan-0")]));
+            let sources = ScanSources::Paths(Arc::from([PlPath::from_string(
+                "python-scan-0".to_string(),
+            )]));
             let cloud_options = None;
             let final_output_schema = output_schema.clone();
             let projected_file_schema = output_schema.clone();
@@ -1013,6 +1010,7 @@ fn to_graph_rec<'a>(
             let missing_columns_policy = MissingColumnsPolicy::Raise;
             let extra_columns_policy = ExtraColumnsPolicy::Ignore;
             let cast_columns_policy = CastColumnsPolicy::ERROR_ON_MISMATCH;
+            let deletion_files = None;
             let verbose = config::verbose();
 
             ctx.graph.add_node(
@@ -1032,6 +1030,7 @@ fn to_graph_rec<'a>(
                         missing_columns_policy,
                         extra_columns_policy,
                         cast_columns_policy,
+                        deletion_files,
                         // Initialized later
                         num_pipelines: AtomicUsize::new(0),
                         n_readers_pre_init: AtomicUsize::new(0),

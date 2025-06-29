@@ -198,10 +198,7 @@ impl Series {
     }
 
     /// Take or clone a owned copy of the inner [`ChunkedArray`].
-    pub fn take_inner<T>(self) -> ChunkedArray<T>
-    where
-        T: 'static + PolarsDataType<IsLogical = FalseT>,
-    {
+    pub fn take_inner<T: PolarsPhysicalType>(self) -> ChunkedArray<T> {
         let arc_any = self.0.as_arc_any();
         let downcast = arc_any
             .downcast::<implementations::SeriesWrap<ChunkedArray<T>>>()
@@ -718,7 +715,7 @@ impl Series {
     /// * List(inner) -> List(physical of inner)
     /// * Array(inner) -> Array(physical of inner)
     /// * Struct -> Struct with physical repr of each struct column
-    pub fn to_physical_repr(&self) -> Cow<Series> {
+    pub fn to_physical_repr(&self) -> Cow<'_, Series> {
         use DataType::*;
         match self.dtype() {
             // NOTE: Don't use cast here, as it might rechunk (if all nulls)
@@ -929,7 +926,7 @@ impl Series {
     }
 
     // used for formatting
-    pub fn str_value(&self, index: usize) -> PolarsResult<Cow<str>> {
+    pub fn str_value(&self, index: usize) -> PolarsResult<Cow<'_, str>> {
         Ok(self.0.get(index)?.str_value())
     }
     /// Get the head of the Series.
@@ -1059,10 +1056,7 @@ impl Default for Series {
     }
 }
 
-impl<T> AsRef<ChunkedArray<T>> for dyn SeriesTrait + '_
-where
-    T: 'static + PolarsDataType<IsLogical = FalseT>,
-{
+impl<T: PolarsPhysicalType> AsRef<ChunkedArray<T>> for dyn SeriesTrait + '_ {
     fn as_ref(&self) -> &ChunkedArray<T> {
         // @NOTE: SeriesTrait `as_any` returns a std::any::Any for the underlying ChunkedArray /
         // Logical (so not the SeriesWrap).
@@ -1078,10 +1072,7 @@ where
     }
 }
 
-impl<T> AsMut<ChunkedArray<T>> for dyn SeriesTrait + '_
-where
-    T: 'static + PolarsDataType<IsLogical = FalseT>,
-{
+impl<T: PolarsPhysicalType> AsMut<ChunkedArray<T>> for dyn SeriesTrait + '_ {
     fn as_mut(&mut self) -> &mut ChunkedArray<T> {
         if !self.as_any_mut().is::<ChunkedArray<T>>() {
             panic!(

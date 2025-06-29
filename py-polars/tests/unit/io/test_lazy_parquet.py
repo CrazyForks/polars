@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
 from collections import OrderedDict
@@ -965,7 +966,13 @@ q = (
     .join(pl.scan_parquet(f), on="x", how="left")
 )
 
-results = [pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), pl.DataFrame()]
+results = [
+    pl.DataFrame(),
+    pl.DataFrame(),
+    pl.DataFrame(),
+    pl.DataFrame(),
+    pl.DataFrame(),
+]
 
 
 def run():
@@ -988,12 +995,22 @@ def run():
 
     results[3] = pl.collect_all(3 * [pl.concat(3 * [q])])[0].head(1)
 
+    print("QUERY-FENCE", file=sys.stderr)
+
+    results[4] = q.collect(background=True).fetch_blocking()
+
 
 t = Thread(target=run, daemon=True)
 t.start()
 t.join(5)
 
-assert [x.equals(pl.DataFrame({"x": 1})) for x in results] == [True, True, True, True]
+assert [x.equals(pl.DataFrame({"x": 1})) for x in results] == [
+    True,
+    True,
+    True,
+    True,
+    True,
+]
 
 print("OK", end="", file=sys.stderr)
 """,
@@ -1026,3 +1043,25 @@ print("OK", end="", file=sys.stderr)
 
     for logs in out_str.split("QUERY-FENCE"):
         ensure_caches_dropped(logs)
+
+
+def test_parquet_prefiltering_inserted_column_23268() -> None:
+    df = pl.DataFrame({"a": [1, 2, 3, 4]}, schema={"a": pl.Int8})
+
+    f = io.BytesIO()
+
+    df.write_parquet(f)
+
+    assert_frame_equal(
+        (
+            pl.scan_parquet(
+                f,
+                schema={"a": pl.Int8, "b": pl.Int16},
+                missing_columns="insert",
+            )
+            .filter(pl.col("a") == 3)
+            .filter(pl.col("b") == 3)
+            .collect()
+        ),
+        pl.DataFrame(schema={"a": pl.Int8, "b": pl.Int16}),
+    )
